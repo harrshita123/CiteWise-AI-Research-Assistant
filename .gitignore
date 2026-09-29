@@ -1,0 +1,13 @@
+work/
+*.zip
+.env
+.env.local
+.venv/
+node_modules/
+dist/
+storage/
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+.DS_Store
+*.ses
