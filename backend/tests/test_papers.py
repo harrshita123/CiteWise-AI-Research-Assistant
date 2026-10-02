@@ -1,12 +1,14 @@
 import asyncio
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 import pymupdf
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import SecretStr, ValidationError
 from pymongo.errors import DuplicateKeyError
 from tokenizers import Tokenizer, models, pre_tokenizers
 
@@ -17,6 +19,7 @@ from app.repositories.papers import PaperRepository
 from app.repositories.vectors import VectorRepository
 from app.routers.papers import router
 from app.services.ingestion import IngestionService
+from app.services.pdf_storage import CloudinaryPdfStorage
 from app.services.pdf_processing import PageText, PdfValidationError, create_chunks, extract_pages
 
 
@@ -117,7 +120,20 @@ class PaperApiTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.settings = Settings(_env_file=None, google_client_id="test", mongodb_uri="mongodb://localhost",
-                                 jwt_secret="test-secret-" * 4, storage_directory=Path(self.directory.name))
+                                 jwt_secret="test-secret-" * 4, storage_directory=Path(self.directory.name),
+                                 cloudinary_cloud_name="test-cloud", cloudinary_api_key="test-key",
+                                 cloudinary_api_secret=SecretStr("test-secret"))
+        upload_patch = patch("app.services.pdf_storage.cloudinary.uploader.upload",
+                             side_effect=lambda _source, **options: {"public_id": options["public_id"]})
+        destroy_patch = patch("app.services.pdf_storage.cloudinary.uploader.destroy", return_value={"result": "ok"})
+        download_patch = patch("app.services.pdf_storage.cloudinary.utils.private_download_url",
+                               return_value="https://api.cloudinary.com/signed-pdf")
+        self.cloudinary_upload = upload_patch.start()
+        self.cloudinary_destroy = destroy_patch.start()
+        self.cloudinary_download = download_patch.start()
+        self.addCleanup(upload_patch.stop)
+        self.addCleanup(destroy_patch.stop)
+        self.addCleanup(download_patch.stop)
         self.repository = MemoryPapers()
         self.ingestion = IngestionService(self.settings)
         self.ingestion.embeddings = FakeEmbeddings()
@@ -151,7 +167,8 @@ class PaperApiTests(unittest.TestCase):
         self.assertEqual(paper["page_count"], 2)
         self.assertEqual(paper["chunk_count"], 2)
         self.assertEqual([chunk["page_number"] for chunk in detail["chunks"]], [1, 2])
-        self.assertEqual(self.ingestion.file_path(paper["id"]).read_bytes(), self.content)
+        self.assertEqual(self.repository.papers[paper["id"]]["storage_provider"], "cloudinary")
+        self.assertEqual(self.cloudinary_upload.call_args.args[0].getvalue(), self.content)
         reopened = VectorRepository(self.settings.storage_directory / "chroma")
         self.assertEqual(len(reopened.preview("alice", paper["id"])), 2)
         vectors = reopened.collection.get(where=reopened.paper_filter("alice", paper["id"]), include=["embeddings"])
@@ -160,11 +177,10 @@ class PaperApiTests(unittest.TestCase):
         second_chunk = self.client.get(f'/api/v1/papers/{paper["id"]}?chunk_offset=1&chunk_limit=1')
         self.assertEqual([chunk["chunk_index"] for chunk in second_chunk.json()["chunks"]], [1])
         self.assertEqual(self.client.get(f'/api/v1/papers/{paper["id"]}?chunk_offset=2').json()["chunks"], [])
-        file_response = self.client.get(f'/api/v1/papers/{paper["id"]}/file')
-        self.assertEqual(file_response.status_code, 200)
-        self.assertEqual(file_response.headers["content-type"], "application/pdf")
+        file_response = self.client.get(f'/api/v1/papers/{paper["id"]}/file', follow_redirects=False)
+        self.assertEqual(file_response.status_code, 307)
+        self.assertEqual(file_response.headers["location"], "https://api.cloudinary.com/signed-pdf")
         self.assertEqual(file_response.headers["cache-control"], "private, no-store")
-        self.assertEqual(file_response.content, self.content)
 
     def test_duplicate_upload_does_not_create_more_vectors(self):
         self.assertEqual(self.upload().status_code, 201)
@@ -175,8 +191,7 @@ class PaperApiTests(unittest.TestCase):
 
     def test_delete_removes_owned_paper_pdf_and_vectors_and_allows_reupload(self):
         paper_id = self.upload().json()["paper"]["id"]
-        path = self.ingestion.file_path(paper_id)
-        self.assertTrue(path.exists())
+        self.assertEqual(self.cloudinary_upload.call_count, 1)
 
         # Recreate the service as it would be after an API restart.
         restarted_ingestion = IngestionService(self.settings)
@@ -185,7 +200,7 @@ class PaperApiTests(unittest.TestCase):
 
         response = self.client.delete(f"/api/v1/papers/{paper_id}")
         self.assertEqual(response.status_code, 204, response.text)
-        self.assertFalse(path.exists())
+        self.cloudinary_destroy.assert_called_once()
         self.assertEqual(self.ingestion.vectors.collection.count(), 0)
         self.assertEqual(self.client.get("/api/v1/papers").json(), [])
         self.assertEqual(self.client.get(f"/api/v1/papers/{paper_id}").status_code, 404)
@@ -197,12 +212,12 @@ class PaperApiTests(unittest.TestCase):
         paper_id = self.upload().json()["paper"]["id"]
         self.user_id = "bob"
         self.assertEqual(self.client.delete(f"/api/v1/papers/{paper_id}").status_code, 404)
-        self.assertTrue(self.ingestion.file_path(paper_id).exists())
+        self.assertEqual(self.cloudinary_destroy.call_count, 0)
 
         self.user_id = "alice"
         self.repository.papers[paper_id]["status"] = "processing"
         self.assertEqual(self.client.delete(f"/api/v1/papers/{paper_id}").status_code, 409)
-        self.assertTrue(self.ingestion.file_path(paper_id).exists())
+        self.assertEqual(self.cloudinary_destroy.call_count, 0)
 
     def test_delete_failure_preserves_record_for_retry(self):
         paper_id = self.upload().json()["paper"]["id"]
@@ -248,7 +263,7 @@ class PaperApiTests(unittest.TestCase):
         paper_id = self.upload().json()["paper"]["id"]
         response = self.client.delete(f"/api/v1/papers/{paper_id}", headers={"Origin": "https://untrusted.example"})
         self.assertEqual(response.status_code, 403)
-        self.assertTrue(self.ingestion.file_path(paper_id).exists())
+        self.assertEqual(self.cloudinary_destroy.call_count, 0)
 
     def test_oversized_upload_is_rejected_before_storage(self):
         self.settings.max_pdf_size_mb = 1
@@ -269,8 +284,70 @@ class PaperApiTests(unittest.TestCase):
         self.assertNotIn("private details", response.text)
         self.assertEqual(self.ingestion.vectors.collection.count(), 0)
         self.assertEqual(self.repository.papers, {})
-        self.assertEqual(list((self.settings.storage_directory / "uploads").glob("*.pdf")), [])
+        self.assertEqual(self.cloudinary_upload.call_count, 0)
         self.assertEqual(self.upload().status_code, 201)
+
+    def test_cloudinary_upload_view_and_delete_keep_owner_checks(self):
+        with patch("app.services.pdf_storage.cloudinary.uploader.upload") as upload, \
+             patch("app.services.pdf_storage.cloudinary.uploader.destroy", return_value={"result": "ok"}) as destroy, \
+             patch("app.services.pdf_storage.cloudinary.utils.private_download_url", return_value="https://api.cloudinary.com/signed-pdf") as download_url:
+            upload.side_effect = lambda _source, **options: {"public_id": options["public_id"]}
+            response = self.upload()
+            self.assertEqual(response.status_code, 201, response.text)
+            paper_id = response.json()["paper"]["id"]
+            self.assertEqual(self.repository.papers[paper_id]["storage_provider"], "cloudinary")
+            self.assertEqual(self.repository.papers[paper_id]["storage_id"], CloudinaryPdfStorage.public_id(paper_id))
+            self.assertFalse(self.ingestion.file_path(paper_id).exists())
+            self.assertEqual(upload.call_args.kwargs["type"], "authenticated")
+            self.assertEqual(upload.call_args.kwargs["resource_type"], "image")
+            self.assertEqual(upload.call_args.args[0].getvalue(), self.content)
+
+            self.user_id = "bob"
+            self.assertEqual(self.client.get(f"/api/v1/papers/{paper_id}/file").status_code, 404)
+            self.assertEqual(self.client.delete(f"/api/v1/papers/{paper_id}").status_code, 404)
+            download_url.assert_not_called()
+            self.user_id = "alice"
+
+            file_response = self.client.get(f"/api/v1/papers/{paper_id}/file", follow_redirects=False)
+            self.assertEqual(file_response.status_code, 307)
+            self.assertEqual(file_response.headers["location"], "https://api.cloudinary.com/signed-pdf")
+            self.assertEqual(file_response.headers["cache-control"], "private, no-store")
+            self.assertEqual(download_url.call_args.kwargs["type"], "authenticated")
+            self.assertEqual(self.client.delete(f"/api/v1/papers/{paper_id}").status_code, 204)
+            destroy.assert_called_once_with(
+                CloudinaryPdfStorage.public_id(paper_id), resource_type="image", type="authenticated", invalidate=True,
+            )
+            self.assertEqual(self.ingestion.vectors.collection.count(), 0)
+
+    def test_cloudinary_failure_removes_partial_vectors(self):
+        with patch("app.services.pdf_storage.cloudinary.uploader.upload", side_effect=RuntimeError("private details")), \
+             patch("app.services.pdf_storage.cloudinary.uploader.destroy", return_value={"result": "not found"}):
+            response = self.upload()
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("private details", response.text)
+        self.assertEqual(self.ingestion.vectors.collection.count(), 0)
+        self.assertEqual(self.repository.papers, {})
+
+    def test_existing_local_paper_survives_switch_to_cloudinary(self):
+        paper_id = "legacy-paper"
+        path = self.ingestion.file_path(paper_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(self.content)
+        self.repository.papers[paper_id] = {
+            "_id": paper_id, "owner_id": "alice", "filename": "legacy.pdf", "status": "ready",
+            "file_hash": "legacy", "created_at": datetime.now(timezone.utc),
+        }
+        self.app.state.ingestion_service = IngestionService(self.settings)
+        self.assertEqual(self.client.get(f"/api/v1/papers/{paper_id}/file").content, self.content)
+        self.assertEqual(self.client.delete(f"/api/v1/papers/{paper_id}").status_code, 204)
+        self.assertFalse(path.exists())
+
+
+class StorageSettingsTests(unittest.TestCase):
+    def test_cloudinary_requires_credentials(self):
+        with self.assertRaises(ValidationError):
+            Settings(_env_file=None, google_client_id="test", mongodb_uri="mongodb://localhost",
+                     jwt_secret="test-secret-" * 4)
 
 
 class PaperRepositoryTests(unittest.IsolatedAsyncioTestCase):

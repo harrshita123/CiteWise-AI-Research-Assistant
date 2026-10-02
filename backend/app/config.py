@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,10 +21,22 @@ class Settings(BaseSettings):
     session_cookie_name: str = "citewise_session"
     session_duration_minutes: int = Field(default=60, ge=5, le=1440)
     storage_directory: Path = Path(__file__).resolve().parents[1] / "storage"
+    cloudinary_cloud_name: str = ""
+    cloudinary_api_key: str = ""
+    cloudinary_api_secret: SecretStr | None = None
     max_pdf_size_mb: int = Field(default=25, ge=1, le=25)
     max_pdf_pages: int = Field(default=300, ge=1, le=1000)
     max_pdf_characters: int = Field(default=2_000_000, ge=1000)
     embedding_batch_size: int = Field(default=32, ge=1, le=64)
+
+    @model_validator(mode="after")
+    def validate_pdf_storage(self) -> "Settings":
+        if not (
+            self.cloudinary_cloud_name and self.cloudinary_api_key
+            and self.cloudinary_api_secret and self.cloudinary_api_secret.get_secret_value()
+        ):
+            raise ValueError("Cloudinary storage requires a cloud name, API key, and API secret.")
+        return self
 
     @property
     def cors_origins(self) -> list[str]:

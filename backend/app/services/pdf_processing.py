@@ -24,9 +24,9 @@ class TextChunk:
     content_hash: str
 
 
-def extract_pages(path: Path, max_pages: int, max_characters: int) -> tuple[int, list[PageText]]:
+def extract_pages(source: Path | bytes, max_pages: int, max_characters: int) -> tuple[int, list[PageText]]:
     try:
-        document = pymupdf.open(path)
+        document = pymupdf.open(source) if isinstance(source, Path) else pymupdf.open(stream=source, filetype="pdf")
     except (pymupdf.FileDataError, RuntimeError) as error:
         raise PdfValidationError("This file could not be read as a PDF.") from error
 

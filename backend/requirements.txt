@@ -11,3 +11,4 @@ PyMuPDF>=1.25,<2
 chromadb>=1.5,<2
 python-multipart>=0.0.20,<1
 tokenizers>=0.20,<1
+cloudinary>=1.46,<2

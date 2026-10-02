@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from pymongo.errors import DuplicateKeyError
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..config import get_settings
@@ -79,6 +79,12 @@ async def view_paper_file(
     paper = await repository.find(user.id, paper_id)
     if paper is None or paper["status"] != "ready":
         raise HTTPException(404, "Paper not found.")
+    if paper.get("storage_provider", "local") == "cloudinary":
+        try:
+            url = ingestion.cloudinary_storage.view_url(paper_id)
+        except Exception:
+            raise HTTPException(503, "The original PDF is temporarily unavailable.") from None
+        return RedirectResponse(url, headers={"Cache-Control": "private, no-store"})
     path = ingestion.file_path(paper_id)
     if not path.is_file():
         raise HTTPException(404, "The original PDF is unavailable.")
@@ -110,7 +116,7 @@ async def delete_paper(
         raise HTTPException(409, "Wait until this paper finishes processing before deleting it.")
 
     try:
-        await run_in_threadpool(ingestion.cleanup, user.id, paper_id)
+        await run_in_threadpool(ingestion.cleanup, user.id, paper_id, paper.get("storage_provider", "local"))
         await repository.remove(user.id, paper_id)
     except Exception:
         raise HTTPException(503, "The paper could not be deleted. Please try again.") from None
@@ -152,6 +158,8 @@ async def upload_paper(
             "_id": paper_id, "owner_id": user.id,
             "filename": file.filename.replace("\\", "/").split("/")[-1][:255],
             "file_hash": sha256(content).hexdigest(), "status": "processing",
+            "storage_provider": "cloudinary",
+            "storage_id": ingestion.cloudinary_storage.public_id(paper_id),
             "embedding_model": ingestion.embeddings.model_name,
             "embedding_dimensions": ingestion.embeddings.dimensions,
             "created_at": datetime.now(timezone.utc),
@@ -167,10 +175,10 @@ async def upload_paper(
             await repository.update(user.id, paper_id, status="ready", **counts)
         except Exception as error:
             message = str(error) if isinstance(error, PdfValidationError) else (
-                "Processing could not finish. Check the local model download and storage, then try again."
+                "Processing could not finish. Check the embedding model and PDF storage, then try again."
             )
             try:
-                await run_in_threadpool(ingestion.cleanup, user.id, paper_id)
+                await run_in_threadpool(ingestion.cleanup, user.id, paper_id, "cloudinary")
                 await repository.remove(user.id, paper_id)
             except Exception:
                 await repository.update(user.id, paper_id, status="failed", error="Processing failed; storage cleanup needs attention.")

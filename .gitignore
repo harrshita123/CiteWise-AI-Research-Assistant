@@ -3,6 +3,7 @@ work/
 .env
 .env.local
 .venv/
+.venv313/
 node_modules/
 dist/
 storage/
