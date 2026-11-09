@@ -55,7 +55,3 @@ cd backend
 cd frontend
 npm run build
 ```
-
-## Current limits
-
-Upload processing runs within the request and uses an in-process lock; it is not a durable job queue. Scanned-only PDFs need OCR, which is not implemented. Semantic question search, generated answers, conversations, multi-paper comparison, a labelled answer-quality evaluation, and deployment are still in progress.
