@@ -33,7 +33,7 @@ You need Python 3.13, Node.js with npm, MongoDB, a Cloudinary account with PDF u
    .venv313/bin/uvicorn app.main:app --reload
    ```
 
-3. Start the website from `frontend/` in another terminal:
+3. Start the website from `frontend/` in another terminal
 
    ```bash
    npm install
