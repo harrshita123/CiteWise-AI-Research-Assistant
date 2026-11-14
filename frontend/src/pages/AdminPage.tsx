@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import Logo from "../components/Logo";
 import { getAdminUsers, getCurrentUser, SignedInUser } from "../services/authApi";
 
 export default function AdminPage() {
@@ -41,11 +40,6 @@ export default function AdminPage() {
 
   return (
     <div className="admin-page">
-      <header className="admin-header">
-        <Logo />
-        <Link to="/papers">Paper library</Link>
-      </header>
-
       <main className="admin-main">
         <p className="label">Administration</p>
         <h1>User access</h1>

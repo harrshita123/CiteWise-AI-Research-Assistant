@@ -1,6 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import WorkspaceLayout from "../components/WorkspaceLayout";
 import WorkspaceIcon from "../components/WorkspaceIcon";
 import { getCurrentUser, SignedInUser } from "../services/authApi";
 import { deletePaper, getPaper, listPapers, paperFileUrl, Paper, PaperDetail, uploadPaper } from "../services/papersApi";
@@ -177,7 +176,7 @@ export default function PapersPage() {
   return (
     loading ? <main className="session-check" role="status">Loading your library...</main> : !user ? (
       <main className="session-check"><p>{error || "Sign in to view your library."}</p><Link className="primary-button" to="/login">Sign in</Link></main>
-    ) : <WorkspaceLayout user={user}>
+    ) : <>
       <main className="admin-main paper-main workspace-library-main">
         <p className="label">Your research library</p>
         <h1>{statusFilter === "processing" ? "Processing uploads" : statusFilter === "ready" ? "Ready papers" : statusFilter === "failed" ? "Failed uploads" : "Your papers"}</h1>
@@ -264,6 +263,6 @@ export default function PapersPage() {
               </section>
             )}
       </main>
-    </WorkspaceLayout>
+    </>
   );
 }

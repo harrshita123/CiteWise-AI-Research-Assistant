@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import AuthLayout from "../components/AuthLayout";
 import GoogleSignInButton from "../components/GoogleSignInButton";
 import PasswordInput from "../components/PasswordInput";
@@ -7,6 +7,8 @@ import { logIn, signInWithGoogle, SignedInUser } from "../services/authApi";
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const [params] = useSearchParams();
+  const destination = params.get("next") === "/research" ? "/research" : "/home";
   const [user, setUser] = useState<SignedInUser | null>(null);
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -14,8 +16,8 @@ export default function LoginPage() {
   const handleCredential = useCallback(async (credential: string) => {
     const { user } = await signInWithGoogle(credential);
     setUser(user);
-    navigate("/home", { replace: true });
-  }, [navigate]);
+    navigate(destination, { replace: true });
+  }, [navigate, destination]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -30,7 +32,7 @@ export default function LoginPage() {
         String(form.get("password") ?? ""),
       );
       setUser(result.user);
-      navigate("/home", { replace: true });
+      navigate(destination, { replace: true });
     } catch (error) {
       setError(error instanceof Error ? error.message : "Login failed.");
     } finally {

@@ -1,11 +1,11 @@
-import { ReactNode, useState } from "react";
-import { Link, NavLink, useNavigate } from "react-router-dom";
+import { useState } from "react";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { logOut, SignedInUser } from "../services/authApi";
 import Logo from "./Logo";
 import WorkspaceIcon from "./WorkspaceIcon";
-import "../workspace.css";
+import "../styles/workspace.css";
 
-export default function WorkspaceLayout({ user, children }: { user: SignedInUser; children: ReactNode }) {
+export default function WorkspaceLayout({ user }: { user: SignedInUser }) {
   const navigate = useNavigate();
   const [logoutError, setLogoutError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
@@ -30,10 +30,11 @@ export default function WorkspaceLayout({ user, children }: { user: SignedInUser
         <nav className="workspace-nav" aria-label="Main workspace">
           <NavLink to="/home" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="home" />Dashboard</NavLink>
           <NavLink to="/papers" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="library" />Library</NavLink>
-          <NavLink to="/research" className={({ isActive }) => `workspace-nav-soon${isActive ? " active" : ""}`}><WorkspaceIcon name="search" />Research <small>Coming soon</small></NavLink>
+          <NavLink to="/research" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="search" />Research</NavLink>
+          <NavLink to="/evaluation" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="shield" />Answer check</NavLink>
           <NavLink to="/compare" className={({ isActive }) => `workspace-nav-soon${isActive ? " active" : ""}`}><WorkspaceIcon name="compare" />Compare <small>Coming soon</small></NavLink>
-          <NavLink to="/evaluation" className={({ isActive }) => `workspace-nav-soon${isActive ? " active" : ""}`}><WorkspaceIcon name="shield" />Evaluation <small>Coming soon</small></NavLink>
-          {user.role === "admin" && <Link to="/admin"><WorkspaceIcon name="user" />Admin</Link>}
+          {user.role === "admin" && <NavLink to="/admin" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="user" />Admin</NavLink>}
+          {user.role === "admin" && <NavLink to="/admin/evaluation" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="shield" />Retrieval evaluation</NavLink>}
         </nav>
         <div className="workspace-sidebar-footer">
           <div className="workspace-profile"><span className="workspace-avatar">{initials}</span><span><strong>{user.name || user.email}</strong><small>{user.role === "admin" ? "Administrator" : "Research workspace"}</small></span></div>
@@ -41,7 +42,7 @@ export default function WorkspaceLayout({ user, children }: { user: SignedInUser
           {logoutError && <p role="alert">{logoutError}</p>}
         </div>
       </aside>
-      <div className="workspace-page">{children}</div>
+      <div className="workspace-page"><Outlet /></div>
     </div>
   );
 }

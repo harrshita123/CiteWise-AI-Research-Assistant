@@ -1,32 +1,17 @@
 import { useEffect, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import WorkspaceIcon from "../components/WorkspaceIcon";
-import WorkspaceLayout from "../components/WorkspaceLayout";
 import { AuthApiError, getCurrentUser, SignedInUser } from "../services/authApi";
 
-type Area = "research" | "compare" | "evaluation";
+type Area = "compare";
 
 const pages = {
-  research: {
-    label: "Research",
-    title: "Ask questions about your papers",
-    description: "This workspace will retrieve relevant passages and build answers you can trace back to the source. Question answering is still being built.",
-    next: "For now, you can upload papers and inspect their saved text chunks in your library.",
-    icon: "search" as const,
-  },
   compare: {
     label: "Compare",
     title: "Compare papers with evidence",
     description: "This area will show where two papers agree and differ, with page references for each point. Comparison is still being built.",
     next: "Add the papers you want to compare to your library first.",
     icon: "compare" as const,
-  },
-  evaluation: {
-    label: "Evaluation",
-    title: "Check answer quality",
-    description: "This area will report retrieval and citation quality after the question-answering workflow is implemented and measured.",
-    next: "The paper ingestion milestone is available now; evaluation scores have not been collected yet.",
-    icon: "shield" as const,
   },
 };
 
@@ -56,7 +41,7 @@ export default function ComingSoonPage({ area }: { area: Area }) {
   if (!user) return <main className="session-check"><p>{error}</p><button className="primary-button" onClick={() => { setLoading(true); setAttempt((value) => value + 1); }}>Try again</button></main>;
 
   const page = pages[area];
-  return <WorkspaceLayout user={user}>
+  return <>
     <main className="coming-page">
       <p className="label">{page.label}</p>
       <div className="coming-card">
@@ -71,5 +56,5 @@ export default function ComingSoonPage({ area }: { area: Area }) {
         </div>
       </div>
     </main>
-  </WorkspaceLayout>;
+  </>;
 }

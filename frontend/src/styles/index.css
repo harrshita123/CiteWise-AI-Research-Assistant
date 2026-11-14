@@ -1,0 +1,10 @@
+/* Load shared and page styles in this order. */
+@import "./base.css";
+@import "./landing.css";
+@import "./auth.css";
+@import "./library.css";
+@import "./research.css";
+@import "./evaluation.css";
+@import "./admin.css";
+@import "./responsive.css";
+@import "./polish.css";

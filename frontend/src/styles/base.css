@@ -1,0 +1,20 @@
+:root {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #111a35;
+  background: #fbfcff;
+  --navy: #071c3e;
+  --blue: #3548c8;
+  --teal: #0b8a8f;
+  --muted: #667087;
+  --line: #dce2ec;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; min-width: 320px; }
+a { color: inherit; text-decoration: none; }
+button, input { font: inherit; }
+
+.logo { display: inline-flex; align-items: center; gap: 10px; font-size: 1.5rem; font-weight: 800; }
+.logo svg { width: 34px; fill: none; stroke: var(--blue); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.session-check { min-height: 100vh; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 16px; padding: 24px; text-align: center; }
