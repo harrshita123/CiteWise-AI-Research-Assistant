@@ -10,6 +10,7 @@ import re
 from datetime import date, datetime, timezone
 from uuid import uuid4
 from urllib.parse import urlparse
+from requests.exceptions import Timeout as RequestTimeout
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -20,6 +21,7 @@ from ..paper_models import ChunkResponse
 from ..providers.answers import (AnswerProvider, AnswerRateLimitError, Evidence, EvidenceAssessment, EvidenceQuote,
                                  EvidenceStatus, ExternalEvidence)
 from ..providers.groq_answers import GroqAnswerProvider, groq_trace
+from ..providers.external_search import TavilyExternalSearch
 from ..repositories.papers import PaperRepository
 from ..repositories.conversations import ConversationRepository
 from ..repositories.vectors import VectorRepository
@@ -102,6 +104,15 @@ class SearchTrace(BaseModel):
     duplicate_requests: int = 0
     retrieved_source_counts: list[int] = Field(default_factory=list)
     rejected_irrelevant_sources: int = 0
+    raw_external_results: int = 0
+    invalid_external_results: int = 0
+    invalid_external_urls: int = 0
+    rejected_external_domains: int = 0
+    duplicate_external_sources: int = 0
+    accepted_external_sources: int = 0
+    fallback_searches: int = 0
+    external_search_errors: int = 0
+    external_search_timeouts: int = 0
     claim_status_counts: dict[str, int] = Field(default_factory=dict)
     verification_failures: int = 0
 
@@ -550,6 +561,17 @@ def _external_query(question: str, missing: str) -> str:
     return " ".join([gap, *context]).strip()[:500]
 
 
+def _fallback_query(question: str, missing: str, first: str) -> str | None:
+    """One narrower retry, retaining entities and topic words from the question."""
+    terms = re.findall(r"[A-Za-z0-9-]+", f"{question} {missing}")
+    ignored = {"what", "which", "where", "when", "why", "how", "does", "did", "the",
+               "and", "from", "with", "this", "that", "there", "paper", "study", "evidence",
+               "information", "missing", "additional", "research", "source", "about", "answer"}
+    focused = " ".join(dict.fromkeys(word for word in terms
+                                     if len(word) > 2 and word.casefold() not in ignored))[:500]
+    return focused if focused and focused.casefold() != first.casefold() else None
+
+
 def _generation_passages(question: str, passages: list[ChunkResponse]) -> list[ChunkResponse]:
     """Use a direct match alone for short fact questions; keep context for broader questions."""
     if not passages:
@@ -842,37 +864,64 @@ async def ask_paper(
                 sources=pdf_sources, assessment=assessment))
         query = (_external_query(question_for_retrieval, assessment.missing_information)
                  if assessment.level == "partial" else question_for_retrieval)
-        search_trace.duplicate_requests += int(query in search_trace.queries)
-        search_trace.queries.append(query)
-        try:
+        async def search_once(search_query: str) -> list[ExternalEvidence]:
+            search_trace.duplicate_requests += int(search_query in search_trace.queries)
+            search_trace.queries.append(search_query)
             traced_search = getattr(external_search, "search_with_trace", None)
             if traced_search:
-                # The provider reports whether it actually used its cache, avoiding
-                # a race between a separate cache check and the search call.
                 search_trace.tavily_calls += 1
-                outcome = await run_in_threadpool(traced_search, query)
+                outcome = await run_in_threadpool(traced_search, search_query)
                 if outcome.cache_hit:
                     search_trace.tavily_calls -= 1
                     search_trace.tavily_cache_hits += 1
                 search_trace.rejected_irrelevant_sources += outcome.rejected_irrelevant
-                external = outcome.results
+                search_trace.raw_external_results += outcome.raw_results
+                search_trace.invalid_external_results += outcome.invalid_results
+                search_trace.invalid_external_urls += outcome.invalid_urls
+                search_trace.rejected_external_domains += outcome.rejected_domains
+                search_trace.duplicate_external_sources += outcome.duplicates
+                found = outcome.results
             else:
                 cached_search = getattr(external_search, "cached", None)
-                cached_external = cached_search(query) if cached_search else None
+                cached_external = cached_search(search_query) if cached_search else None
                 if cached_external is not None:
                     search_trace.tavily_cache_hits += 1
-                    external = cached_external
+                    found = cached_external
                 else:
                     search_trace.tavily_calls += 1
-                    external = await run_in_threadpool(external_search.search, query)
-        except Exception:
+                    found = await run_in_threadpool(external_search.search, search_query)
+            search_trace.retrieved_source_counts.append(len(found))
+            search_trace.accepted_external_sources += len(found)
+            return found
+
+        search_failed = False
+        try:
+            external = await search_once(query)
+        except Exception as exc:
             search_trace.failures += 1
+            search_trace.external_search_errors += 1
+            search_trace.external_search_timeouts += int(isinstance(exc, (TimeoutError, RequestTimeout)))
             external = []
-        search_trace.retrieved_source_counts.append(len(external))
+            search_trace.retrieved_source_counts.append(0)
+            search_failed = True
+        if not external and not search_failed and isinstance(external_search, TavilyExternalSearch):
+            fallback = _fallback_query(question_for_retrieval, assessment.missing_information, query)
+            if fallback and fallback not in search_trace.queries:
+                search_trace.fallback_searches += 1
+                try:
+                    external = await search_once(fallback)
+                except Exception as exc:
+                    search_trace.failures += 1
+                    search_trace.external_search_errors += 1
+                    search_trace.external_search_timeouts += int(isinstance(exc, (TimeoutError, RequestTimeout)))
+                    search_trace.retrieved_source_counts.append(0)
+                    search_failed = True
         if not external:
+            reason = ("External search was unavailable. This does not establish that no external information exists."
+                      if search_failed else "The searches returned no usable external evidence.")
             return await save_result(AskResponse(paper_id=payload.paper_id,
                 status="partially_supported" if pdf_sources else "not_mentioned",
-                answer="The PDF does not fully answer this question, and reliable external evidence was unavailable.",
+                answer=f"The PDF does not fully answer this question. {reason}",
                 sources=pdf_sources, assessment=assessment))
         # Search snippets cannot establish the complete, current state of the law.
         # Show the official sources without asking the model to infer legal duties from them.

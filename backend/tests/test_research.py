@@ -559,7 +559,10 @@ class ResearchTests(unittest.TestCase):
             "claim_status_counts": {"supported": 2}, "verification_failures": 0,
             "groq_calls": 0, "groq_cache_hits": 0, "groq_attempts": 0, "groq_retries": 0, "groq_failures": 0,
             "groq_rate_limits": 0, "groq_server_errors": 0, "groq_network_errors": 0,
-            "groq_rate_limit_kind": None})
+            "groq_rate_limit_kind": None, "raw_external_results": 0, "invalid_external_results": 0,
+            "invalid_external_urls": 0, "rejected_external_domains": 0,
+            "duplicate_external_sources": 0, "accepted_external_sources": 1,
+            "fallback_searches": 0, "external_search_errors": 0, "external_search_timeouts": 0})
         conversation = self.client.get(f"/api/v1/research/conversations/{partial.json()['conversation_id']}")
         self.assertEqual(conversation.json()["messages"][0]["external_sources"][0]["id"], "ext1")
 
@@ -613,6 +616,35 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(cached.json()["search_trace"]["tavily_calls"], 0)
         self.assertEqual(cached.json()["search_trace"]["tavily_cache_hits"], 1)
         self.assertEqual(cached.json()["search_trace"]["rejected_irrelevant_sources"], 1)
+
+    def test_empty_initial_search_uses_one_focused_fallback(self):
+        self.client.app.state.answer_provider = AssessedAnswers(EvidenceAssessment("none", []))
+        self.client.app.state.external_search = TavilyExternalSearch("test-key")
+        empty = Mock(status_code=200)
+        empty.json.return_value = {"results": []}
+        found = Mock(status_code=200)
+        found.json.return_value = {"results": [{"title": "Webcam privacy research",
+            "url": "https://example.edu/privacy", "content": "External result about webcam privacy."}]}
+        with patch("app.providers.external_search.requests.post", side_effect=[empty, found]) as post:
+            response = self.client.post("/api/v1/research/ask", json={
+                "paper_id": "paper-1", "question": "What does research say about webcam privacy?"})
+        self.assertEqual(response.status_code, 200)
+        trace = response.json()["search_trace"]
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(trace["fallback_searches"], 1)
+        self.assertEqual(trace["retrieved_source_counts"], [0, 1])
+        self.assertEqual(trace["accepted_external_sources"], 1)
+
+    def test_provider_failure_does_not_trigger_fallback_or_claim_absence(self):
+        self.client.app.state.answer_provider = AssessedAnswers(EvidenceAssessment("none", []))
+        self.client.app.state.external_search = TavilyExternalSearch("test-key")
+        with patch("app.providers.external_search.requests.post", side_effect=TimeoutError) as post:
+            response = self.client.post("/api/v1/research/ask", json={
+                "paper_id": "paper-1", "question": "What does research say about webcam privacy?"})
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(response.json()["search_trace"]["external_search_timeouts"], 1)
+        self.assertEqual(response.json()["search_trace"]["fallback_searches"], 0)
+        self.assertIn("does not establish that no external information exists", response.json()["answer"])
 
     def test_explicit_sample_size_overrides_wrong_none_without_web_search(self):
         directory = tempfile.TemporaryDirectory()
