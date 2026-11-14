@@ -55,12 +55,12 @@ class GroqAnswerTests(unittest.TestCase):
     def test_external_search_uses_only_real_https_results(self):
         response = Mock(status_code=200)
         response.json.return_value = {"results": [
-            {"title": "Official study", "url": "https://example.edu/study", "content": "Relevant excerpt"},
+            {"title": "Webcam privacy study", "url": "https://example.edu/study", "content": "Camera monitoring raised privacy concerns."},
             {"title": "Vendor blog", "url": "https://example.org/study", "content": "Marketing excerpt"},
             {"title": "Bad", "url": "javascript:alert(1)", "content": "Bad excerpt"},
         ]}
         with patch("app.providers.external_search.requests.post", return_value=response) as post:
-            results = TavilyExternalSearch("test-key").search("question")
+            results = TavilyExternalSearch("test-key").search("webcam privacy")
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].url, "https://example.edu/study")
         self.assertEqual(post.call_args.kwargs["json"]["include_answer"], False)
@@ -187,6 +187,54 @@ class GroqAnswerTests(unittest.TestCase):
                 search.search("webcam privacy")
             self.assertEqual(len(search.search("webcam privacy")), 1)
             self.assertEqual(post.call_count, 2)
+
+    def test_external_search_accepts_synonyms_and_rejects_unrelated_domains(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {"results": [
+            {"title": "Camera monitoring and student confidentiality", "url": "https://example.edu/one",
+             "content": "Camera monitoring affects privacy among students."},
+            {"title": "Camera monitoring and student confidentiality", "url": "https://example.edu/one?tracking=1",
+             "content": "Camera monitoring affects privacy among students."},
+            {"title": "Camera monitoring", "url": "https://example.edu.evil.test/two",
+             "content": "Student privacy."},
+            {"title": "Library catalog", "url": "https://example.edu/three", "content": "Book hours."},
+            {"title": "Camera monitoring", "url": "https://user:pass@example.edu/four",
+             "content": "Student privacy."},
+        ]}
+        with patch("app.providers.external_search.requests.post", return_value=response):
+            outcome = TavilyExternalSearch("test-key").search_with_trace("webcam student privacy")
+        self.assertEqual(len(outcome.results), 1)
+        self.assertEqual(outcome.duplicates, 1)
+        self.assertEqual(outcome.rejected_domains, 1)
+        self.assertEqual(outcome.rejected_irrelevant, 1)
+        self.assertEqual(outcome.invalid_urls, 1)
+        self.assertEqual(outcome.raw_results, 5)
+
+    def test_empty_search_is_cached_briefly(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {"results": []}
+        search = TavilyExternalSearch("test-key")
+        with patch("app.providers.external_search.requests.post", return_value=response) as post:
+            first = search.search_with_trace("webcam privacy")
+            second = search.search_with_trace("webcam privacy")
+        self.assertFalse(first.cache_hit)
+        self.assertTrue(second.cache_hit)
+        self.assertEqual(post.call_count, 1)
+
+    def test_relevance_across_research_topics(self):
+        relevant = (
+            ("webcam proctoring privacy", "Camera monitoring study", "Student confidentiality and privacy"),
+            ("biometric data law India", "Indian biometric data protection act", "Rules for collection"),
+            ("Python async timeout", "Python asyncio timeout documentation", "Timeout handling"),
+            ("vaccine efficacy trial", "Randomized vaccine trial", "Efficacy findings"),
+        )
+        for query, title, excerpt in relevant:
+            with self.subTest(query=query):
+                self.assertTrue(TavilyExternalSearch._relevant(query, title, excerpt))
+        self.assertFalse(TavilyExternalSearch._relevant(
+            "webcam proctoring privacy", "University library", "Opening hours and book lending"))
+        self.assertTrue(TavilyExternalSearch._trusted_host("research.gov.au"))
+        self.assertFalse(TavilyExternalSearch._trusted_host("research.gov.au.evil.test"))
 
     def test_availability_requires_key(self):
         self.assertFalse(GroqAnswerProvider("", "openai/gpt-oss-120b", 120).available())
