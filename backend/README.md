@@ -2,7 +2,7 @@
 
 This service supports email/password and Google authentication, stores users in MongoDB, and sets an HttpOnly session cookie.
 
-It also supports PDF upload, page-aware text extraction, overlapping chunks, local embeddings, persistent ChromaDB storage, and Cloudinary storage for new original PDFs.
+It also supports PDF upload, page-aware text extraction, overlapping chunks, local embeddings, persistent ChromaDB storage, Cloudinary storage for new original PDFs, and owner-scoped semantic passage search.
 
 Google login uses Google Identity Services in popup mode. The React credential callback sends the Google-signed ID token to `POST /api/v1/auth/google`; the API verifies it with Google's Python authentication library before creating a CiteWise session. CiteWise does not currently request Google API access or refresh tokens.
 
@@ -48,6 +48,7 @@ The flow is `papers router -> IngestionService -> PyMuPDF -> token-aware chunks 
 - Local model: `all-MiniLM-L6-v2`, CPU inference, 384 dimensions, no API key.
 - First use downloads approximately 80 MB of model files. Later inference runs locally. For a smooth demo, run the real embedding check below before uploading.
 - Each chunk has at most 220 model tokens, with 30 overlapping tokens within the same page. Chunking uses a non-truncating copy of the model's tokenizer.
+- Repeated text lines near the top or bottom of at least 60% of PDF pages are removed before chunking, including running headers and footers with changing page numbers. Unique margin text is kept. This does not change the original PDF or previously stored chunks; existing papers need to be reprocessed to use the cleaner.
 - Embeddings are written in batches of 32. Settings can reduce the batch size and upload limits.
 - Default limits: 25 MB, 300 pages, and two million extracted characters. Encrypted PDFs and PDFs without readable text are rejected. Blank pages are skipped without changing later page numbers. Mixed scanned/text PDFs index only their extractable text; OCR and advanced multi-column layout analysis are future work.
 - Upload is a single request that returns `201` after embedding completes. CPU and storage work run outside the async event loop. Run **one API worker** for this milestone; concurrent uploads receive `429` with `Retry-After`.
@@ -61,8 +62,22 @@ The flow is `papers router -> IngestionService -> PyMuPDF -> token-aware chunks 
 | `GET /api/v1/papers/{id}` | Owned paper and up to ten chunk previews |
 | `GET /api/v1/papers/{id}/file` | Owned original PDF, locally served or redirected to a short-lived Cloudinary URL |
 | `DELETE /api/v1/papers/{id}` | Remove an owned, non-processing paper, its PDF, and its vectors |
+| `POST /api/v1/research/search` | Search one owned ready paper using `paper_id`, `question`, and optional `limit` (1–10); return ranked passages with page numbers |
+| `GET /api/v1/research/capabilities` | Report whether the configured answer provider is available |
+| `POST /api/v1/research/ask` | Assess retrieved PDF chunks, answer from them when sufficient, and conditionally search external sources for missing information |
+| `GET /api/v1/research/conversations` | List the signed-in user's saved single-paper Q&A sessions |
+| `GET /api/v1/research/conversations/{id}` | Read a saved session with owner enforcement |
+| `DELETE /api/v1/research/conversations/{id}` | Delete an owned saved session |
+| `GET /api/v1/evaluation/runs` | List an admin's saved retrieval evaluation runs |
+| `POST /api/v1/evaluation/runs` | Admin only: evaluate 1–50 labeled questions against owned ready papers; save Hit@5 and per-question pages |
 
-This is a learning milestone, not the complete ingestion system. Durable jobs, restart recovery, multi-file upload, retries, retrieval, LLM answers, and WebSockets are not implemented here. A process crash can leave a `processing` record requiring operator cleanup; keep the API running during the demo. Production needs request-body limits at the proxy and a durable worker queue. Model quality on research papers has not yet been evaluated.
+## Question answering
+
+Answer generation uses [Groq](https://console.groq.com/) with `openai/gpt-oss-120b`. Create a Groq API key and set `GROQ_API_KEY` in the ignored `backend/.env`; never put it in the frontend or commit it. Groq receives the question and selected PDF excerpts, not the full PDF. Restart the backend after changing `.env`. The Research page shows Generate answer when Groq is configured. Free API usage has account-specific rate limits, so check them in Groq Console. `GROQ_MODEL` can select another compatible model that supports strict JSON schema output.
+
+Before answering, Groq returns `sufficient`, `partial`, or `none`, supporting chunk IDs and verbatim quote fragments, and the missing information for a partial result. The backend checks IDs and quotes against retrieved chunks, requires a question-term match for supported assessments, and rejects an unsupported `none` when a retrieved chunk has a strong lexical match. An explicit sample size can also be read directly from a retrieved sentence. Invalid assessments do not authorize external search. These checks validate source linkage, not full semantic entailment or every page of the PDF. A request for a missing statistic from this particular paper, such as its p-value, never triggers web search; another source cannot provide it. For `sufficient`, answer generation uses only assessed PDF evidence. For `partial` or `none`, a configured Tavily search supplies external excerpts; Groq returns separate PDF and external sections with IDs that the backend checks against supplied sources. Indian legal searches accept only official `.gov.in` and `.nic.in` results. External links and excerpts and PDF pages are displayed separately and saved with the conversation. Set `TAVILY_API_KEY` in the ignored `backend/.env` to enable fallback. Without it, CiteWise reports the PDF evidence limit and does not guess. Search snippets and generated claims may still be incomplete or mistaken; verify important claims against the linked sources. Q&A sessions and individual answer feedback are saved in MongoDB with owner checks. Answer quality still needs evaluation on a labeled set of real-paper questions.
+
+This is a learning milestone, not the complete ingestion and Q&A system. Durable jobs, restart recovery, multi-file upload, retries, and WebSockets are not implemented here. A process crash can leave a `processing` record requiring operator cleanup; keep the API running during the demo. Production needs request-body limits at the proxy and a durable worker queue. Retrieval and answer quality on research papers have not yet been evaluated.
 
 ## Verify locally
 
@@ -75,3 +90,15 @@ From `backend`:
 ```
 
 Unit/API tests use in-memory MongoDB substitutes and deterministic test vectors, alongside real PyMuPDF and ChromaDB. `check_embeddings` separately runs the real local model, checks persisted vectors, and verifies token limits and ownership filtering without reading MongoDB credentials or writing to Atlas.
+
+## Retrieval evaluation
+
+Create a JSON Lines file with one labelled question per line. Each case needs an indexed paper's `owner_id` and `paper_id`, the `question`, and one or more correct original PDF page numbers in `expected_pages`:
+
+```json
+{"owner_id":"example-owner","paper_id":"example-paper","question":"Which libraries worked with OCLC?","expected_pages":[2]}
+```
+
+Run `.venv313/bin/python -m scripts.evaluate_retrieval cases.jsonl` from `backend/`. The script searches ChromaDB with the same embedding and ranking path as `/research/search` and reports page-level Hit@5. It does not call Groq or print passage text. Use a fixed set of real paper questions before claiming retrieval or answer reliability; the example above is a format illustration, not an evaluation result.
+
+The admin Retrieval evaluation dashboard offers the same page-level check through the API. Label each question with an expected PDF viewer page, run retrieval, and inspect saved Hit@5 scores plus returned pages. Runs are owner-scoped in MongoDB. This metric does not assess generated answer correctness.
