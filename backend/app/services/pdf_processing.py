@@ -1,6 +1,8 @@
+from collections import Counter
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+import re
 
 import pymupdf
 from tokenizers import Tokenizer
@@ -24,6 +26,18 @@ class TextChunk:
     content_hash: str
 
 
+def _margin_key(text: str, top: float, bottom: float, height: float) -> tuple[str, str] | None:
+    if bottom <= height * 0.12:
+        margin = "header"
+    elif top >= height * 0.82:
+        margin = "footer"
+    else:
+        return None
+    # Running page numbers change, while the surrounding header/footer stays the same.
+    normalized = re.sub(r"\d+", "#", text.lower())
+    return margin, " ".join(normalized.split())
+
+
 def extract_pages(source: Path | bytes, max_pages: int, max_characters: int) -> tuple[int, list[PageText]]:
     try:
         document = pymupdf.open(source) if isinstance(source, Path) else pymupdf.open(stream=source, filetype="pdf")
@@ -36,15 +50,36 @@ def extract_pages(source: Path | bytes, max_pages: int, max_characters: int) -> 
         if document.page_count > max_pages:
             raise PdfValidationError(f"Use a PDF with at most {max_pages} pages for this milestone.")
 
-        pages = []
+        extracted = []
+        margin_counts: Counter[tuple[str, str]] = Counter()
         character_count = 0
         for page in document:
-            text = " ".join(page.get_text("text", sort=True).split())
-            character_count += len(text)
+            lines = []
+            margin_keys = set()
+            for block in page.get_text("dict", sort=True)["blocks"]:
+                if block["type"] != 0:
+                    continue
+                for line in block["lines"]:
+                    text = "".join(span["text"] for span in line["spans"]).strip()
+                    if not text:
+                        continue
+                    key = _margin_key(text, line["bbox"][1], line["bbox"][3], page.rect.height)
+                    lines.append((text, key))
+                    if key:
+                        margin_keys.add(key)
+                    character_count += len(text)
             if character_count > max_characters:
                 raise PdfValidationError("This PDF contains too much text. Please upload a smaller paper.")
+            extracted.append((page.number + 1, lines))
+            margin_counts.update(margin_keys)
+
+        repeat_threshold = max(2, (document.page_count * 3 + 4) // 5)
+        repeated_margins = {key for key, count in margin_counts.items() if count >= repeat_threshold}
+        pages = []
+        for page_number, lines in extracted:
+            text = " ".join(" ".join(line.split()) for line, key in lines if key not in repeated_margins)
             if text:
-                pages.append(PageText(page.number + 1, text))
+                pages.append(PageText(page_number, text))
 
         if not pages:
             raise PdfValidationError("No readable text was found. Scanned PDFs need OCR, which is not available yet.")

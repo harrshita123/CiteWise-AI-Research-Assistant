@@ -90,6 +90,32 @@ class PdfProcessingTests(unittest.TestCase):
         self.assertEqual([page.page_number for page in pages], [1, 3])
         self.assertIn("Results", pages[1].text)
 
+    def test_removes_repeated_running_margins_without_removing_body_text(self):
+        with pymupdf.open() as document:
+            for number in range(1, 4):
+                page = document.new_page(width=600, height=800)
+                page.insert_text((40, 40), "Research conference running header")
+                page.insert_text((40, 120), f"Evidence on page {number}.")
+                if number == 1:
+                    page.insert_text((40, 150), "Resource Discovery in a Network Environment is the paper title.")
+                if number == 2:
+                    page.insert_text((40, 700), "Unique footnote with useful evidence.")
+                page.insert_text((40, 745),
+                                 f"Page | {number} Lorcan Dempsey. Resource Discovery in a Network Environment. Sept 2010")
+            content = document.tobytes()
+
+        count, pages = extract_pages(content, 300, 10000)
+        chunks = create_chunks(pages, test_tokenizer())
+
+        self.assertEqual(count, 3)
+        self.assertEqual([page.page_number for page in pages], [1, 2, 3])
+        self.assertTrue(all(f"Evidence on page {number}." in pages[number - 1].text
+                            for number in range(1, 4)))
+        self.assertIn("paper title", pages[0].text)
+        self.assertIn("Unique footnote with useful evidence.", pages[1].text)
+        self.assertTrue(all("running header" not in chunk.text and "Page |" not in chunk.text
+                            for chunk in chunks))
+
     def test_chunks_overlap_without_crossing_pages_or_losing_tail(self):
         pages = [PageText(2, " ".join(f"word{i}" for i in range(500))), PageText(4, "Final evidence.")]
         tokenizer = test_tokenizer()
@@ -252,7 +278,7 @@ class PaperApiTests(unittest.TestCase):
 
     def test_rejects_foreign_origin_and_invalid_pdf(self):
         response = self.client.post("/api/v1/papers", headers={"Origin": "https://untrusted.example"},
-                                    files={"file": ("paper.pdf", self.content, "application/pdf")})
+    files={"file": ("paper.pdf", self.content, "application/pdf")})
         self.assertEqual(response.status_code, 403)
         self.assertEqual(self.upload(b"not a PDF").status_code, 422)
         self.assertEqual(self.upload(b"%PDF- broken document").status_code, 422)
