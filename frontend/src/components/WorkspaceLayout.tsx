@@ -31,7 +31,6 @@ export default function WorkspaceLayout({ user }: { user: SignedInUser }) {
           <NavLink to="/home" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="home" />Dashboard</NavLink>
           <NavLink to="/papers" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="library" />Library</NavLink>
           <NavLink to="/research" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="search" />Research</NavLink>
-          <NavLink to="/evaluation" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="shield" />Answer check</NavLink>
           <NavLink to="/compare" className={({ isActive }) => `workspace-nav-soon${isActive ? " active" : ""}`}><WorkspaceIcon name="compare" />Compare <small>Coming soon</small></NavLink>
           {user.role === "admin" && <NavLink to="/admin" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="user" />Admin</NavLink>}
           {user.role === "admin" && <NavLink to="/admin/evaluation" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="shield" />Retrieval evaluation</NavLink>}

@@ -9,7 +9,6 @@ import HomePage from "./pages/HomePage";
 import ComingSoonPage from "./pages/ComingSoonPage";
 import ResearchPage from "./pages/ResearchPage";
 import EvaluationPage from "./pages/EvaluationPage";
-import AnswerCheckPage from "./pages/AnswerCheckPage";
 import WorkspaceLayout from "./components/WorkspaceLayout";
 import { AuthApiError, getCurrentUser, SignedInUser } from "./services/authApi";
 
@@ -85,7 +84,7 @@ export default function App() {
         <Route path="/home" element={<HomePage />} />
         <Route path="/research" element={<ResearchPage />} />
         <Route path="/compare" element={<ComingSoonPage area="compare" />} />
-        <Route path="/evaluation" element={<AnswerCheckPage />} />
+        <Route path="/evaluation" element={<Navigate to="/research" replace />} />
         <Route path="/admin/evaluation" element={<EvaluationPage />} />
         <Route path="/admin" element={<AdminPage />} />
         <Route path="/papers" element={<PapersPage />} />

@@ -103,7 +103,6 @@ export default function HomePage() {
             <section className="home-card home-actions" aria-labelledby="actions-title"><h2 id="actions-title">Quick actions</h2>
               <Link to="/papers?focus=upload"><span className="home-action-icon"><WorkspaceIcon name="upload" size={28} /></span><span><strong>Upload PDF</strong><small>Add a paper to your library</small></span><WorkspaceIcon name="chevron" size={19} /></Link>
               <Link to="/papers"><span className="home-action-icon"><WorkspaceIcon name="library" size={28} /></span><span><strong>Browse library</strong><small>See your papers and text previews</small></span><WorkspaceIcon name="chevron" size={19} /></Link>
-              <Link to="/evaluation"><span className="home-action-icon"><WorkspaceIcon name="shield" size={28} /></span><span><strong>Answer check</strong><small>Review answers, sources, and feedback</small></span><WorkspaceIcon name="chevron" size={19} /></Link>
               {user.role === "admin" && <Link to="/admin"><span className="home-action-icon"><WorkspaceIcon name="user" size={28} /></span><span><strong>Admin access</strong><small>View user accounts</small></span><WorkspaceIcon name="chevron" size={19} /></Link>}
             </section>
             <section className="home-card home-processing" aria-labelledby="processing-title"><div className="home-card-header"><h2 id="processing-title">Ingestion status</h2><Link to="/papers?status=processing">View processing <WorkspaceIcon name="chevron" size={16} /></Link></div>
