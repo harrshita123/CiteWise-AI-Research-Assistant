@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     max_pdf_pages: int = Field(default=300, ge=1, le=1000)
     max_pdf_characters: int = Field(default=2_000_000, ge=1000)
     embedding_batch_size: int = Field(default=32, ge=1, le=64)
+    groq_api_key: SecretStr | None = None
+    groq_model: str = "openai/gpt-oss-120b"
+    answer_timeout_seconds: int = Field(default=120, ge=10, le=300)
+    tavily_api_key: SecretStr | None = None
 
     @model_validator(mode="after")
     def validate_pdf_storage(self) -> "Settings":
