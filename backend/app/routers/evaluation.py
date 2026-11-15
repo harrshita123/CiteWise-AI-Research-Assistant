@@ -26,6 +26,7 @@ class EvaluationRequest(BaseModel):
 class CaseResult(EvaluationCase):
     returned_pages: list[int]
     hit_at_5: bool
+    reciprocal_rank: float | None = None
 
 
 class EvaluationRun(BaseModel):
@@ -33,13 +34,16 @@ class EvaluationRun(BaseModel):
     created_at: datetime
     case_count: int
     hit_at_5: float
+    mean_reciprocal_rank: float | None = None
     results: list[CaseResult]
 
 
 def _run_response(document: dict) -> EvaluationRun:
     return EvaluationRun(id=document["_id"], created_at=document["created_at"],
                          case_count=document["case_count"],
-                         hit_at_5=document["hit_at_5"], results=document["results"])
+                         hit_at_5=document["hit_at_5"],
+                         mean_reciprocal_rank=document.get("mean_reciprocal_rank"),
+                         results=document["results"])
 
 
 @router.get("/runs", response_model=list[EvaluationRun])
@@ -77,12 +81,15 @@ async def create_run(payload: EvaluationRequest, request: Request,
         for case, question, embedding in zip(payload.cases, questions, embeddings):
             passages = ingestion.vectors.search(user.id, case.paper_id, embedding, 5, question=question)
             pages = [passage.page_number for passage in passages]
+            rank = next((index for index, page in enumerate(pages, 1)
+                         if page == case.expected_page), None)
             results.append({
                 "paper_id": case.paper_id,
                 "question": question,
                 "expected_page": case.expected_page,
                 "returned_pages": pages,
                 "hit_at_5": case.expected_page in pages,
+                "reciprocal_rank": 1 / rank if rank else 0.0,
             })
         return results
 
@@ -91,6 +98,7 @@ async def create_run(payload: EvaluationRequest, request: Request,
     report = {
         "case_count": count,
         "hit_at_5": sum(item["hit_at_5"] for item in results) / count,
+        "mean_reciprocal_rank": sum(item["reciprocal_rank"] for item in results) / count,
         "results": results,
     }
     repository: EvaluationRepository = request.app.state.evaluation_repository

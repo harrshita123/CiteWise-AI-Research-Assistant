@@ -3,6 +3,7 @@ from typing import Literal
 from collections import Counter, OrderedDict
 from hashlib import sha256
 import logging
+import ipaddress
 import unicodedata
 import hmac
 from threading import Lock
@@ -26,6 +27,8 @@ from ..repositories.papers import PaperRepository
 from ..repositories.conversations import ConversationRepository
 from ..repositories.vectors import VectorRepository
 from ..services.ingestion import IngestionService
+from ..services.evidence_coverage import CoveragePassage, coverage_report, missing_coverage, requested_coverage
+from ..services.research_subjects import requested_subjects, subject_spans
 from ..services.claim_verification import split_claims, review_claims, present_claims
 
 router = APIRouter(prefix="/api/v1/research", tags=["research"])
@@ -182,7 +185,8 @@ def _conversation_response(document: dict) -> ConversationResponse:
 async def _verified_sections(provider: AnswerProvider, question: str, pdf_text: str,
                              external_text: str, pdf_ids: list[str], external_ids: list[str],
                              pdf_sources: dict[str, AnswerSource],
-                             external_sources: dict[str, ExternalEvidence]
+                             external_sources: dict[str, ExternalEvidence],
+                             request_id: str | None = None, debug_claims: bool = False
                              ) -> tuple[str, str, list[ClaimReviewResponse]]:
     claims = split_claims(pdf_text, external_text)
     if not claims or len(claims) > 20:
@@ -221,6 +225,32 @@ async def _verified_sections(provider: AnswerProvider, question: str, pdf_text: 
             except ValueError:
                 pass
     reviewed = review_claims(claims, proposed, evidence, verified_dates)
+    safe_request_id = request_id if isinstance(request_id, str) and re.fullmatch(
+        r"[A-Za-z0-9_-]{1,64}", request_id) else "none"
+    for index, item in enumerate(reviewed, start=1):
+        logging.getLogger("uvicorn.error").info(
+            "research_claim_review request_id=%s claim_index=%d status=%s "
+            "supporting_source_ids=%s opposing_source_ids=%s reason=%s",
+            safe_request_id, index, item.status,
+            [quote.source_id for quote in item.supporting],
+            [quote.source_id for quote in item.opposing], item.reason_code)
+        if debug_claims:
+            def debug_text(value: str) -> str:
+                if value and (any(value in source.text for source in evidence)
+                              or any(quote.quote in value for quote in item.supporting + item.opposing)):
+                    return "[source_text_redacted]"
+                value = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+                               "[email_redacted]", value)
+                return re.sub(r"(?<!\w)(?:\+?\d[\d(). -]{7,}\d)(?!\w)",
+                              "[phone_redacted]", value)
+            logging.getLogger("uvicorn.error").debug(
+                "research_claim_debug request_id=%s claim_index=%d claim_text=%r "
+                "status=%s supporting_source_ids=%s opposing_source_ids=%s "
+                "provider_explanation=%r reason=%s",
+                safe_request_id, index, debug_text(item.claim.text), item.status,
+                [quote.source_id for quote in item.supporting],
+                [quote.source_id for quote in item.opposing],
+                debug_text(item.explanation), item.reason_code)
     responses = [ClaimReviewResponse(text=item.claim.text, section=item.claim.section,
         status=item.status,
         supporting=[ClaimQuoteResponse(source_id=q.source_id, quote=q.quote) for q in item.supporting],
@@ -229,35 +259,45 @@ async def _verified_sections(provider: AnswerProvider, question: str, pdf_text: 
     return present_claims(reviewed, "pdf"), present_claims(reviewed, "external"), responses
 
 
+def _local_claim_debug(request: Request) -> bool:
+    """Allow claim text diagnostics only with Uvicorn DEBUG on a loopback connection."""
+    if not logging.getLogger("uvicorn.error").isEnabledFor(logging.DEBUG) or not request.client:
+        return False
+    try:
+        return ipaddress.ip_address(request.client.host).is_loopback
+    except ValueError:
+        return False
+
+
 def _methodology_comparison_gaps(question: str, claims: list[ClaimReviewResponse]) -> list[str]:
-    """Report requested comparison parts that did not survive claim verification."""
-    if not (re.search(r"\bstudy\s+a\b", question, re.I)
-            and re.search(r"\bstudy\s+b\b", question, re.I)
-            and re.search(r"\b(?:methodolog\w*|designs?|participants?)\b", question, re.I)):
+    """Report only requested parts missing from independently verified PDF claims."""
+    subjects, dimensions = requested_coverage(question)
+    if not dimensions or (len(subjects) < 2 and len(dimensions) < 2):
         return []
     supported = [item.text for item in claims if item.section == "pdf" and item.status == "supported"]
+    for item in claims:
+        if item.section != "pdf" or item.status != "partially_supported":
+            continue
+        labels = [subject for subject in subjects if re.search(rf"\b{re.escape(subject)}\b", item.text, re.I)]
+        for quote in item.supporting:
+            named = [subject for subject in subjects
+                     if re.search(rf"\b{re.escape(subject)}\b", quote.quote, re.I)]
+            prefix = labels[0] if not named and len(labels) == 1 else ""
+            supported.append(f"{prefix} {quote.quote}")
+    missing = missing_coverage(question, supported)
     gaps = []
-    for label in ("A", "B"):
-        statements = [text for text in supported if re.search(rf"\bstudy\s+{label}\b", text, re.I)]
-        statements.extend(quote.quote for item in claims
-                          if item.section == "pdf" and item.status == "partially_supported"
-                          and re.search(rf"\bstudy\s+{label}\b", item.text, re.I)
-                          for quote in item.supporting)
-        has_design = any(re.search(r"\b(?:design|randomiz\w*|experiment\w*|matched)\b", text, re.I)
-                         for text in statements)
-        has_participants = any(re.search(r"\b\d[\d,]*\s+(?:students|participants|subjects)\b", text, re.I)
-                               for text in statements)
-        if not has_design and not has_participants:
-            gaps.append(f"Study {label}'s design and participants")
-        elif not has_design:
-            gaps.append(f"Study {label}'s design")
-        elif not has_participants:
-            gaps.append(f"Study {label}'s participants")
-    if not any(re.search(r"\bstudy\s+a\b", text, re.I)
-               and re.search(r"\bstudy\s+b\b", text, re.I)
-               and re.search(r"\b(?:whereas|while|unlike|differ\w*|versus|compared|comparison)\b", text, re.I)
-               for text in supported):
-        gaps.append("the methodological differences")
+    for subject in subjects or [""]:
+        absent = [dimension for label, dimension in missing if label == subject]
+        if absent:
+            label = f"{subject}'s" if subject else "the"
+            gaps.append(f"{label} {' and '.join(absent)}")
+    if (len(subjects) >= 2
+            and re.search(r"\b(?:compar\w*|differ\w*|similar\w*|versus|contrast)\b", question, re.I)
+            and not any(all(re.search(rf"\b{re.escape(subject)}\b", text, re.I) for subject in subjects)
+                        and re.search(r"\b(?:whereas|while|unlike|differ\w*|versus|compared|comparison)\b", text, re.I)
+                        for text in supported)):
+        gaps.append("the methodological differences" if re.search(r"\bmethodolog\w*\b", question, re.I)
+                    else "the requested comparison")
     return gaps
 
 
@@ -306,7 +346,10 @@ def _evidence_excerpt(question: str, text: str) -> str:
 
 def _evidence_context(question: str, text: str) -> str:
     """Give the model nearby sentences so a qualification is not lost."""
-    if re.search(r"\b(?:both studies|study a|study b|compar\w*|combined|together|alert\w*|generaliz\w*|privacy|anxiety|integrity|recommend\w*)\b", question, re.I):
+    subjects, dimensions = requested_coverage(question)
+    if (len(subjects) > 1 or len(dimensions) > 1
+            or re.search(r"\b(?:both|compar\w*|combined|together|explain|evaluate|synthesiz\w*|"
+                         r"recommend\w*|relationship|why)\b", question, re.I)):
         if len(text) <= 2400:
             return text.strip()
         sentences = re.split(r"(?<=[.!?])\s+", text)
@@ -326,42 +369,31 @@ def _evidence_context(question: str, text: str) -> str:
     return " ".join(sentences[max(0, best_index - 1):best_index + 2])[:1200].strip()
 
 
-def _direct_pdf_coverage(question: str, sources: dict[str, AnswerSource]) -> list[str]:
-    """Recognize directly stated counts, never infer broad comparisons from keywords."""
-    if (re.match(r"\s*how many\b", question, re.I)
-            and not re.search(r"\b(?:both|combined|total|together|compar\w*)\b", question, re.I)):
-        nouns = [noun for noun in ("universities", "students", "participants", "courses")
-                 if re.search(rf"\b{noun}\b", question, re.I)]
-        study = re.search(r"\bstudy\s+([ab])\b", question, re.I)
-        if nouns:
-            for source in sources.values():
-                if study and (not re.search(rf"\bstudy\s+{study.group(1)}\b", source.text, re.I)
-                              or re.search(rf"\bstudy\s+{'b' if study.group(1).lower() == 'a' else 'a'}\b",
-                                           source.text, re.I)):
-                    continue
-                if all(re.search(rf"\b\d[\d,]*(?:\s+[a-z-]+){{0,2}}\s+{noun}\b",
-                                 source.text, re.I) for noun in nouns):
-                    return [source.id]
-    return []
-
-
 def _quote_tokens(value: str) -> str:
     value = unicodedata.normalize("NFKC", value).casefold()
     return " ".join(re.findall(r"\d[\d,]*(?:\.\d+)?|[^\W\d_]+|%", value))
 
 
 def _validate_assessment(assessment: EvidenceAssessment, question: str,
-                         sources: dict[str, AnswerSource]) -> EvidenceReview | None:
+                         sources: dict[str, AnswerSource],
+                         request_id: str | None = None) -> EvidenceReview | None:
     """Reject unsupported labels before they can authorize external search."""
-    def reject(reason: str, source_id: str | None = None) -> None:
-        logging.getLogger(__name__).info("evidence_assessment_rejected reason=%s source_id=%s",
-                                         reason, source_id or "none")
+    def reject(reason: str) -> None:
+        cited_ids = assessment.chunk_ids
+        quotes = assessment.supporting_quotes
+        safe_request_id = request_id if isinstance(request_id, str) and re.fullmatch(
+            r"[A-Za-z0-9_-]{1,64}", request_id) else "none"
+        level = assessment.level if assessment.level in ("sufficient", "partial", "none") else "invalid"
+        logging.getLogger(__name__).info(
+            "evidence_assessment_rejected request_id=%s reason=%s level=%s "
+            "retrieved_sources=%d cited_source_ids=%d supporting_quotes=%d",
+            safe_request_id, reason, level, len(sources),
+            len(cited_ids) if isinstance(cited_ids, list) else 0,
+            len(quotes) if isinstance(quotes, list) else 0)
         return None
 
     if assessment.level not in ("sufficient", "partial", "none"):
         return reject("invalid_assessment_level")
-    if assessment.level != "sufficient" and (direct_ids := _direct_pdf_coverage(question, sources)):
-        return EvidenceReview(level="sufficient", chunk_ids=direct_ids)
     ids = assessment.chunk_ids
     if not isinstance(ids, list) or any(not isinstance(item, str) or item not in sources for item in ids):
         return reject("unknown_source_id")
@@ -402,82 +434,20 @@ def _validate_assessment(assessment: EvidenceAssessment, question: str,
                 valid_quote_ids.add(quote.chunk_id)
                 valid_quotes.append(quote)
                 continue
-            # Models sometimes copy several labeled PDF fields verbatim but
-            # reorder the fields. Verify each complete field independently.
-            fields = re.split(r"(?=(?:Setting|Participants|Design|Observation period):\s*)",
-                              quote.quote, flags=re.I)
-            field_spans = [field.strip() for field in fields if field.strip()]
-            if (len(field_spans) >= 2 and not re.search(r"\.\.\.|…", quote.quote)
-                    and all(re.match(r"^(?:Setting|Participants|Design|Observation period):", field, re.I)
-                            and len(field) >= 12
-                            and f" {_quote_tokens(field)} " in normalized_chunk for field in field_spans)):
-                valid_quote_ids.add(quote.chunk_id)
-                valid_quotes.append(quote)
-                logging.getLogger(__name__).info(
-                    "evidence_assessment_verified_reordered_fields source_id=%s field_count=%s",
-                    quote.chunk_id, len(field_spans))
-                continue
             invalid_quote_ids.add(quote.chunk_id)
-            logging.getLogger(__name__).info(
-                "evidence_assessment_rejected reason=quote_not_found_or_order_mismatch source_id=%s",
-                quote.chunk_id)
     if invalid_quote_ids:
-        # A redundant comparison-table quote may be malformed while separate
-        # verbatim passages still establish both sides of a comparison.
-        compares_both = (assessment.level == "sufficient"
-                         and re.search(r"\bstudy\s+a\b", question, re.I)
-                         and re.search(r"\bstudy\s+b\b", question, re.I))
-        valid_ids = [item for item in ids if item in valid_quote_ids and item not in invalid_quote_ids]
-        topic_terms = VectorRepository._terms(question)
-        methodology = bool(re.search(r"\bmethodolog\w*\b", question, re.I))
-        def relevant(item: str) -> bool:
-            passage = sources[item].text
-            return (bool(topic_terms & VectorRepository._terms(passage))
-                    or bool(methodology and re.search(
-                        r"\b(?:design|participant\w*|sample|randomiz\w*|experiment\w*|course\w*|setting)\b",
-                        passage, re.I)))
-        covers_both = all(any(re.search(rf"\bstudy\s+{label}\b", sources[item].text, re.I)
-                              and not re.search(rf"\bstudy\s+{other}\b", sources[item].text, re.I)
-                              and relevant(item)
-                              for item in valid_ids)
-                          for label, other in (("a", "b"), ("b", "a")))
-        # An extra malformed quote must not discard a complete set of exact
-        # quotes for the requested methodology fields in one study.
-        single_study = re.search(r"\bstudy\s+([ab])\b", question, re.I)
-        single_study = single_study if not compares_both else None
-        requested_fields = {
-            "design": r"\b(?:methodolog\w*|design)\b",
-            "participants": r"\b(?:sample size|participants?|students?)\b",
-            "setting": r"\b(?:universit\w*|regions?)\b",
-            "observation period": r"\b(?:observation period|duration|semester)\b",
-        }
-        required = [name for name, pattern in requested_fields.items() if re.search(pattern, question, re.I)]
-        complete_study_quotes = False
-        if single_study and required and valid_quote_ids:
-            label = single_study.group(1)
-            for item in ids:
-                if item not in valid_quote_ids:
-                    continue
-                passage = sources[item].text
-                if not re.search(rf"\bstudy\s+{label}\b", passage, re.I):
-                    continue
-                quoted = " ".join(quote.quote for quote in valid_quotes if quote.chunk_id == item)
-                has_fields = all(re.search(rf"\b{re.escape(name)}:\s*\S+", quoted, re.I)
-                                 for name in required)
-                has_counts = (not re.search(r"\b(?:sample size|participants?|students?)\b", question, re.I)
-                              or bool(re.search(r"\bParticipants:\s*(?:(?!\b(?:Design|Setting|Observation period):).)*?\d[\d,]*",
-                                                quoted, re.I)))
-                has_universities = (not re.search(r"\buniversit\w*\b", question, re.I)
-                                    or bool(re.search(r"\bSetting:\s*(?:(?!\b(?:Design|Participants|Observation period):).)*?"
-                                                      r"\d[\d,]*\s+universit\w*", quoted, re.I)))
-                has_regions = (not re.search(r"\bregions?\b", question, re.I)
-                               or bool(re.search(r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+regions?\b",
-                                                 quoted, re.I)))
-                if has_fields and has_counts and has_universities and has_regions:
-                    complete_study_quotes = True
-                    valid_ids = [item]
-                    break
-        if not ((compares_both and covers_both) or complete_study_quotes):
+        valid_ids = [item for item in ids if item in valid_quote_ids]
+        subjects, dimensions = requested_coverage(question)
+        quoted = []
+        for quote in valid_quotes:
+            if quote.chunk_id not in valid_ids:
+                continue
+            named = {name for name, _, _ in subject_spans(sources[quote.chunk_id].text)}
+            prefix = next(iter(named)) if len(named) == 1 and next(iter(named)) in subjects else ""
+            quoted.append(CoveragePassage(quote.chunk_id, f"{prefix} {quote.quote}"))
+        complete = bool(dimensions and valid_ids and
+                        all(item.status == "information_present" for item in coverage_report(question, quoted)))
+        if not complete:
             return reject("quote_not_found_or_order_mismatch")
         ids = valid_ids
         logging.getLogger(__name__).info(
@@ -485,18 +455,6 @@ def _validate_assessment(assessment: EvidenceAssessment, question: str,
     if assessment.level == "none":
         if ids:
             return reject("none_with_source_ids")
-        if (re.search(r"\b(?:was|is|did)\b.*\b(?:studied|evaluated|measured)\b", question, re.I)
-                and re.search(r"\bfacial recognition\b", question, re.I)):
-            for source in sources.values():
-                if re.search(r"\bfacial recognition (?:accuracy|performance)\s+not studied\b",
-                             source.text, re.I):
-                    return EvidenceReview(level="sufficient", chunk_ids=[source.id])
-        if re.search(r"\bsample size\b", question, re.I):
-            for source in sources.values():
-                if re.search(r"\b(?:study|trial|cohort|sample)\s+(?:included|enrolled|comprised)\s+"
-                             r"\d[\d,]*\s+(?:students|participants|subjects|patients)\b",
-                             source.text, re.I):
-                    return EvidenceReview(level="sufficient", chunk_ids=[source.id])
         # A strong lexical match is a reason to inspect the PDF, not to claim it says nothing.
         terms = VectorRepository._terms(question)
         explicit_legal_gap = bool(re.search(r"\b(?:legal|law|regulation|requirements?)\b", question, re.I)
@@ -521,21 +479,47 @@ def _validate_assessment(assessment: EvidenceAssessment, question: str,
             return reject("missing_partial_information")
     level = assessment.level
     missing = assessment.missing_information.strip()
-    if (level == "sufficient" and re.search(r"\bstudy\s+a\b", question, re.I)
-            and re.search(r"\bstudy\s+b\b", question, re.I)):
-        absent = [label for label in ("A", "B") if not any(
-            re.search(rf"\bstudy\s+{label}\b", sources[item].text, re.I) for item in ids)]
-        if absent:
+    if level == "sufficient":
+        subjects, _ = requested_coverage(question)
+        quoted_passages = []
+        for quote in valid_quotes:
+            if quote.chunk_id not in ids:
+                continue
+            passage = sources[quote.chunk_id].text
+            labels = [subject for subject in subjects if re.search(rf"\b{re.escape(subject)}\b", passage, re.I)]
+            label = labels[0] if len(labels) == 1 else ""
+            quoted_passages.append(f"{label} {quote.quote}")
+        gaps = missing_coverage(question, quoted_passages)
+        if gaps:
             level = "partial"
-            missing = f"The retrieved PDF passages do not establish Study {' and '.join(absent)}'s findings for this comparison."
+            missing = "The cited PDF quotes do not establish " + ", ".join(
+                f"{subject + ' ' if subject else ''}{dimension}" for subject, dimension in gaps) + "."
     return EvidenceReview(level=level, chunk_ids=list(dict.fromkeys(ids)),
                           missing_information=missing[:500])
 
 
 def _asks_for_paper_specific_fact(question: str) -> bool:
     """Outside papers cannot supply a statistic missing from this particular PDF."""
-    return bool(re.search(r"\b(p[ -]?value|sample size|number of participants|cohort size)\b", question, re.I)
+    return bool(re.search(r"\b(p[ -]?value|sample size|number of participants|cohort size|"
+                          r"confidence interval|effect size|hazard ratio|odds ratio|standard deviation)\b", question, re.I)
                 and re.search(r"\b(this|the|paper|study|experiment|trial)\b", question, re.I))
+
+
+def _asks_only_about_pdf(question: str) -> bool:
+    """Keep explicit document-scope questions within the selected PDF."""
+    if re.search(r"\b(?:outside|external|online|web|other sources|beyond the (?:paper|pdf)|"
+                 r"search (?:the )?web|additional research)\b"
+                 r"|\band\b.{0,80}\b(?:current|latest|recent)\s+"
+                 r"(?:law|legal requirements?|regulations?|research|studies|sources)\b",
+                 question, re.I):
+        return False
+    return bool(re.search(
+        r"\b(?:this|the|uploaded|selected)\s+(?:paper|pdf|document|article)\b"
+        r"|\b(?:in|from|according to)\s+(?:this|the|uploaded|selected)\s+"
+        r"(?:study|paper|pdf|document|article)\b"
+        r"|\b(?:does|did|was|were|is|are)\s+(?:this|the)\s+(?:study|paper|pdf|document)\s+"
+        r"(?:report|mention|measure|study|evaluate|include|contain)\b",
+        question, re.I))
 
 
 def _external_query(question: str, missing: str) -> str:
@@ -584,70 +568,6 @@ def _generation_passages(question: str, passages: list[ChunkResponse]) -> list[C
     return passages
 
 
-def _reported_calculation(question: str, sources: dict[str, AnswerSource]) -> tuple[str, str, str] | None:
-    """Use explicit dossier facts and inputs; never infer a missing operand."""
-    if (re.search(r"\bstudy b\b", question, re.I)
-            and re.search(r"\b(?:how many|sample size)\b", question, re.I)
-            and re.search(r"\b(?:universities|participants|students|courses|sample size)\b", question, re.I)
-            and not re.search(r"\b(?:both|combined|total|together|compare)\b", question, re.I)):
-        for source in sources.values():
-            match = re.search(r"Study B.*?Setting:\s*(\d+) universities.*?Participants:\s*([\d,]+) "
-                              r"students across (\d+) online courses", source.text, re.I | re.S)
-            if match:
-                universities, students, courses = (int(value.replace(",", "")) for value in match.groups())
-                return (f"Study B involved {students:,} students across {universities} universities and "
-                        f"{courses} online courses.", source.id, match.group(0))
-    if re.search(r"\balerts?\b", question, re.I) and re.search(
-            r"\b(?:confirm\w*|unconfirm\w*|percent\w*|proportion|share)\b", question, re.I):
-        for source in sources.values():
-            match = re.search(
-                r"Total automated alerts\s+(\d+)\s+Alerts associated with confirmed misconduct\s+(\d+)\s+"
-                r"Alerts not confirmed as misconduct\s+(\d+)\s+Share associated with confirmed misconduct\s+([\d.]+)%",
-                source.text, re.I)
-            if match:
-                total, confirmed, unconfirmed = (int(value) for value in match.groups()[:3])
-                reported_share = float(match.group(4))
-                if total <= 0 or total - confirmed != unconfirmed or abs(100 * confirmed / total - reported_share) > .05:
-                    continue
-                caution = re.search(r"The authors caution that an unconfirmed alert does not necessarily mean "
-                                    r"the system made a technical error\.", source.text, re.I)
-                answer = (f"Study B recorded {total} automated alerts. {confirmed} were associated with confirmed "
-                          f"misconduct; {total} − {confirmed} = {unconfirmed} were not confirmed. "
-                          f"{confirmed} ÷ {total} × 100 = {reported_share:g}% of alerts were associated with "
-                          "confirmed misconduct.")
-                if caution:
-                    answer += " An unconfirmed alert is not automatically a technical false positive."
-                return answer, source.id, source.text[match.start():(caution.end() if caution else match.end())]
-    if re.search(r"\b(?:combined|total|together)\b", question, re.I) and re.search(
-            r"\b(?:participants|students|sample size)\b", question, re.I):
-        for source in sources.values():
-            match = re.search(r"Study A \(S-A\) Study B \(S-B\).*?Sample size\s+([\d,]+)\s+([\d,]+)",
-                              source.text, re.I | re.S)
-            if match:
-                a, b = (int(value.replace(",", "")) for value in match.groups())
-                return (f"Study A: {a:,} participants; Study B: {b:,} participants. "
-                        f"{a:,} + {b:,} = {a + b:,} participants across two separate studies, "
-                        "not one pooled experiment.", source.id,
-                        match.group(0))
-    if (re.search(r"\bstudy a\b", question, re.I)
-            and re.search(r"\b(?:difference|percentage.points?)\b", question, re.I)
-            and re.search(r"\b(?:misconduct|integrity)\b", question, re.I)):
-        for source in sources.values():
-            match = re.search(
-                r"Study A reports confirmed misconduct of ([\d.]+)% in monitored sections and "
-                r"([\d.]+)% in unmonitored sections, a difference of ([\d.]+) percentage points",
-                source.text, re.I)
-            if match:
-                monitored, unmonitored, reported = (float(value) for value in match.groups())
-                difference = unmonitored - monitored
-                if abs(difference - reported) < 1e-9:
-                    fmt = lambda value: f"{value:g}"
-                    return (f"Study A reports {fmt(monitored)}% monitored and {fmt(unmonitored)}% "
-                            f"unmonitored misconduct. {fmt(unmonitored)}% − {fmt(monitored)}% = "
-                            f"{fmt(difference)} percentage points.", source.id, match.group(0))
-    return None
-
-
 def _question_with_context(question: str, conversation: dict | None,
                            reply_to_message_id: str | None = None) -> str:
     """Resolve short follow-ups using only the previous question as context."""
@@ -660,7 +580,8 @@ def _question_with_context(question: str, conversation: dict | None,
                        or re.search(r"\b(it|its|they|them|their|this|that|those)\b", question, re.I)
                        or re.match(r"^(and|what about|how about)\b", question, re.I))
     if (not vague_why_use and not re.match(r"^(and|what about|how about)\b", question, re.I)
-            and re.search(r"\b(?:study\s+[ab]|paper|pdf|document)\b", question, re.I)):
+            and (requested_subjects(question)
+                 or re.search(r"\b(?:paper|pdf|document)\b", question, re.I))):
         return question
     if not (short_follow_up and refers_back):
         return question
@@ -696,7 +617,8 @@ async def research_capabilities(
             "key_revision": revision}
 
 
-async def _retrieve(payload: SearchRequest, request: Request, user: UserResponse) -> list[ChunkResponse]:
+async def _retrieve(payload: SearchRequest, request: Request, user: UserResponse,
+                    expand: bool = False) -> list[ChunkResponse]:
     if not payload.question.strip():
         raise HTTPException(422, "Enter a question.")
     repository: PaperRepository = request.app.state.paper_repository
@@ -708,9 +630,58 @@ async def _retrieve(payload: SearchRequest, request: Request, user: UserResponse
 
     ingestion: IngestionService = request.app.state.ingestion_service
     def retrieve() -> list[ChunkResponse]:
-        embedding = ingestion.embeddings.embed([payload.question.strip()])[0]
-        return ingestion.vectors.search(user.id, payload.paper_id, embedding, payload.limit,
-                                        question=payload.question.strip())
+        question = payload.question.strip()
+        embedding = ingestion.embeddings.embed([question])[0]
+        broad = bool(re.search(r"\b(?:both|compar\w*|combined|together|overall|universally)\b", question, re.I))
+        initial = ingestion.vectors.search(user.id, payload.paper_id, embedding, payload.limit,
+                                          question=question, candidate_limit=50 if broad else 25)
+        subjects, dimensions = requested_coverage(question)
+        def diagnose(stage: str, items: list[ChunkResponse]) -> list[tuple[str, str]]:
+            report = coverage_report(question, [CoveragePassage(
+                f"c{item.chunk_index}-{item.content_hash[:12]}", item.text,
+                item.page_number, item.chunk_index) for item in items])
+            logging.getLogger(__name__).info(
+                "research_coverage stage=%s candidate_ids=%s dimensions=%s",
+                stage, [f"c{item.chunk_index}-{item.content_hash[:12]}" for item in items],
+                [(item.subject, item.dimension, item.status, item.candidate_ids,
+                  item.information_ids, item.inferred_subject_ids)
+                 for item in report])
+            return [(item.subject, item.dimension) for item in report if item.status != "information_present"]
+        if not expand or (len(subjects) < 2 and len(dimensions) < 2):
+            diagnose("initial", initial)
+            return initial
+        gaps = diagnose("initial", initial)
+        if not gaps:
+            return initial
+        # A small number of targeted semantic queries can recover sections
+        # outside the first ranked set without sending 50 chunks to Groq.
+        topic = " ".join(sorted(VectorRepository._terms(question) - {
+            "design", "methodology", "participant", "student", "sample", "setting",
+            "duration", "finding", "result", "limitation", "difference", "important"}))
+        focused = [f"{subject} {dimension} {topic}".strip()[:500]
+                   for subject, dimension in gaps[:3]]
+        vectors = ingestion.embeddings.embed(focused)
+        selected = {(item.chunk_index, item.content_hash): item for item in initial}
+        for focused_question, vector in zip(focused, vectors):
+            candidates = ingestion.vectors.search(user.id, payload.paper_id, vector, 4,
+                                                  question=focused_question, candidate_limit=50)
+            logging.getLogger(__name__).info("research_coverage stage=focused candidate_ids=%s",
+                [f"c{item.chunk_index}-{item.content_hash[:12]}" for item in candidates])
+            for candidate in candidates:
+                key = (candidate.chunk_index, candidate.content_hash)
+                if key in selected:
+                    continue
+                before = missing_coverage(question, [item.text for item in selected.values()])
+                after = missing_coverage(question, [item.text for item in selected.values()] + [candidate.text])
+                if not (len(after) < len(before)
+                        or VectorRepository._terms(focused_question) & VectorRepository._terms(candidate.text)):
+                    continue
+                selected[key] = candidate
+                if len(selected) >= 10:
+                    diagnose("final", list(selected.values()))
+                    return list(selected.values())
+        diagnose("final", list(selected.values()))
+        return list(selected.values())
 
     return await run_in_threadpool(retrieve)
 
@@ -778,7 +749,7 @@ async def ask_paper(
                                                    payload.reply_to_message_id)
     retrieval_payload = SearchRequest(paper_id=payload.paper_id, question=question_for_retrieval,
                                       limit=payload.limit)
-    passages = await _retrieve(retrieval_payload, request, user)
+    passages = await _retrieve(retrieval_payload, request, user, expand=True)
     paper_record = await request.app.state.paper_repository.find(user.id, payload.paper_id)
     provider: AnswerProvider | None = getattr(request.app.state, "answer_provider", None)
     if provider is None:
@@ -798,14 +769,6 @@ async def ask_paper(
         )
     logging.getLogger(__name__).info("research_retrieval request_id=%s source_ids=%s",
                                      payload.request_id or "none", list(sources))
-    calculated = _reported_calculation(question_for_retrieval, sources)
-    if calculated is not None:
-        text, source_id, quote = calculated
-        return await save_result(AskResponse(paper_id=payload.paper_id, status="answered",
-            answer=f"{text} [{source_id}]", sources=[sources[source_id]],
-            assessment=EvidenceReview(level="sufficient", chunk_ids=[source_id]),
-            claims=[ClaimReviewResponse(text=text, section="pdf", status="supported",
-                supporting=[ClaimQuoteResponse(source_id=source_id, quote=quote)], opposing=[])]))
     evidence = [Evidence(id=source.id, text=_evidence_context(question_for_retrieval, source.text))
                 for source in sources.values()]
     assessment = None
@@ -824,7 +787,8 @@ async def ask_paper(
         try:
             if assessment is None:
                 proposed = await run_in_threadpool(assess, question_for_retrieval, evidence)
-                assessment = _validate_assessment(proposed, question_for_retrieval, sources)
+                assessment = _validate_assessment(proposed, question_for_retrieval, sources,
+                                                  request_id=payload.request_id)
         except AnswerRateLimitError as exc:
             raise HTTPException(429, "Evidence assessment is temporarily rate limited.",
                                 headers={"Retry-After": exc.retry_after}) from None
@@ -843,14 +807,19 @@ async def ask_paper(
         logging.getLogger(__name__).info("research_assessment request_id=%s level=%s source_ids=%s",
                                          payload.request_id or "none", assessment.level, assessment.chunk_ids)
 
-    pdf_comparison = bool(re.search(r"\bstudy\s+a\b", question_for_retrieval, re.I)
-                          and re.search(r"\bstudy\s+b\b", question_for_retrieval, re.I))
+    pdf_comparison = len(requested_coverage(question_for_retrieval)[0]) >= 2
+    quote_coverage_gap = bool(assessment and assessment.missing_information.startswith(
+        "The cited PDF quotes do not establish "))
     if assessment and assessment.level in ("partial", "none") and not (
-            assessment.level == "partial" and pdf_comparison):
+            assessment.level == "partial" and (pdf_comparison or quote_coverage_gap)):
         pdf_sources = [sources[item] for item in assessment.chunk_ids]
-        if _asks_for_paper_specific_fact(question_for_retrieval):
+        if _asks_for_paper_specific_fact(question_for_retrieval) or _asks_only_about_pdf(question_for_retrieval):
             detail = ("The retrieved PDF passages do not report that value. "
-                      "An external source cannot establish a statistic for this paper.")
+                      "An external source cannot establish a statistic for this paper."
+                      if _asks_for_paper_specific_fact(question_for_retrieval) else
+                      ("The PDF supports part of this question. Missing from the retrieved PDF evidence: "
+                       f"{assessment.missing_information}" if assessment.level == "partial" else
+                       "The retrieved PDF passages do not establish the requested information."))
             return await save_result(AskResponse(paper_id=payload.paper_id,
                 status="partially_supported" if pdf_sources else "not_mentioned", answer=detail,
                 sources=pdf_sources, assessment=assessment))
@@ -982,7 +951,8 @@ async def ask_paper(
         try:
             checked_pdf, checked_external, claim_reviews = await _verified_sections(
                 provider, question_for_retrieval, pdf_text if assessment.level == "partial" else "",
-                external_text, pdf_ids, external_ids, sources, external_by_id)
+                external_text, pdf_ids, external_ids, sources, external_by_id,
+                request_id=payload.request_id, debug_claims=_local_claim_debug(request))
         except AnswerRateLimitError as exc:
             raise HTTPException(429, "Claim verification is temporarily rate limited.",
                                 headers={"Retry-After": exc.retry_after}) from None
@@ -1004,25 +974,6 @@ async def ask_paper(
             status=reviewed_status,
             answer=answer, sources=cited_pdf, external_sources=cited_external,
             assessment=assessment, claims=claim_reviews))
-
-    if (assessment and assessment.level == "sufficient"
-            and re.search(r"\bsample size\b", question_for_retrieval, re.I)
-            and not re.search(r"\b(?:combined|both|total|together|and|plus|methodolog\w*|design|"
-                              r"universit\w*|regions?|duration|observation|setting)\b",
-                              question_for_retrieval, re.I)):
-        for source_id in assessment.chunk_ids:
-            match = re.search(r"\b(?:study|trial|cohort|sample)\s+(?:included|enrolled|comprised)\s+"
-                              r"\d[\d,]*\s+(?:students|participants|subjects|patients)\b",
-                              sources[source_id].text, re.I)
-            if match:
-                statement = match.group(0)
-                return await save_result(AskResponse(paper_id=payload.paper_id, status="answered",
-                    answer=f"{statement[0].upper()}{statement[1:]}.",
-                    sources=[sources[source_id]], assessment=assessment,
-                    claims=[ClaimReviewResponse(text=f"{statement[0].upper()}{statement[1:]}",
-                        section="pdf", status="supported",
-                        supporting=[ClaimQuoteResponse(source_id=source_id, quote=statement)],
-                        opposing=[])]))
 
     if not evidence:
         return await save_result(AskResponse(paper_id=payload.paper_id, status="insufficient_evidence",
@@ -1067,7 +1018,8 @@ async def ask_paper(
     try:
         checked_pdf, _, claim_reviews = await _verified_sections(
             provider, question_for_retrieval, answer.strip(), "", cited, [],
-            {item: sources[item] for item in cited}, {})
+            {item: sources[item] for item in cited}, {}, request_id=payload.request_id,
+            debug_claims=_local_claim_debug(request))
     except AnswerRateLimitError as exc:
         raise HTTPException(429, "Claim verification is temporarily rate limited.",
                             headers={"Retry-After": exc.retry_after}) from None
@@ -1091,6 +1043,16 @@ async def ask_paper(
     logging.getLogger(__name__).info("research_verification request_id=%s response_status=%s claim_statuses=%s source_ids=%s",
                                      payload.request_id or "none", status,
                                      [item.status for item in claim_reviews], sorted(used_ids))
+    verified = [CoveragePassage(f"claim-{index}", item.text) for index, item in enumerate(claim_reviews)
+                if item.section == "pdf" and item.status == "supported" and item.supporting]
+    logging.getLogger(__name__).info("research_verified_coverage request_id=%s dimensions=%s claim_sources=%s",
+        payload.request_id or "none",
+        [(item.subject, item.dimension, item.status, item.information_ids)
+         for item in coverage_report(question_for_retrieval, verified,
+                                     {item.id for item in verified})],
+        [(f"claim-{index}", [quote.source_id for quote in item.supporting])
+         for index, item in enumerate(claim_reviews) if item.section == "pdf"
+         and item.status == "supported" and item.supporting])
     return await save_result(AskResponse(paper_id=payload.paper_id, status=status, answer=checked_pdf,
         sources=[sources[item] for item in cited if item in used_ids], assessment=assessment,
         claims=claim_reviews))

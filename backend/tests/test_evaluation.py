@@ -75,6 +75,8 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(report["case_count"], 3)
         self.assertNotIn("hit_at_1", report)
         self.assertAlmostEqual(report["hit_at_5"], 2 / 3)
+        self.assertAlmostEqual(report["mean_reciprocal_rank"], 0.5)
+        self.assertEqual([item["reciprocal_rank"] for item in report["results"]], [1.0, 0.5, 0.0])
         self.assertEqual([item["returned_pages"] for item in report["results"]], [[2, 5]] * 3)
         self.assertEqual(self.client.get("/api/v1/evaluation/runs").json()[0]["id"], report["id"])
 
@@ -89,6 +91,8 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("hit_at_1", response.json()[0])
         self.assertNotIn("hit_at_1", response.json()[0]["results"][0])
+        self.assertIsNone(response.json()[0]["mean_reciprocal_rank"])
+        self.assertIsNone(response.json()[0]["results"][0]["reciprocal_rank"])
 
     def test_rejects_foreign_unready_and_invalid_pages(self):
         for paper_id, page, status in (("foreign", 1, 404), ("pending", 1, 409), ("owned", 9, 422)):

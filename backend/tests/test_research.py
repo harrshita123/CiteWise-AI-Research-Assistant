@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import time
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI
+from starlette.requests import Request
 from fastapi.testclient import TestClient
 
 from app.dependencies import get_current_user
@@ -19,9 +21,12 @@ from app.providers.answers import (AnswerRateLimitError, ClaimAssessment, ClaimQ
 from app.providers.groq_answers import GroqAnswerProvider
 from app.providers.external_search import TavilyExternalSearch
 from app.routers.research import (_evidence_context, _evidence_excerpt, _generation_passages,
-                                  _methodology_comparison_gaps, _question_with_context,
-                                  _reported_calculation, _validate_assessment, _verified_sections,
-                                  AnswerSource, ClaimQuoteResponse, ClaimReviewResponse, router)
+                                  _asks_only_about_pdf, _methodology_comparison_gaps, _question_with_context,
+                                  _validate_assessment, _verified_sections,
+                                  _local_claim_debug, _retrieve, AnswerSource, ClaimQuoteResponse, ClaimReviewResponse,
+                                  SearchRequest, router)
+from app.services.evidence_coverage import missing_coverage, requested_coverage
+from app.services.claim_verification import split_claims
 from app.services.pdf_processing import TextChunk
 
 
@@ -197,6 +202,101 @@ class ResearchTests(unittest.TestCase):
                 quote="Design: matched-course comparison. Participants: 780 students")], opposing=[])
         self.assertEqual(_methodology_comparison_gaps(question, [study_a, partly_verified_b, difference]), [])
 
+    def test_coverage_checks_only_requested_dimensions(self):
+        question = "Compare Study A and Study B designs and limitations."
+        self.assertEqual(requested_coverage(question)[1], ["design", "limitations"])
+        passages = ["Study A used a randomized design; a short period limits generalizability.",
+                    "Study B used a matched design; volunteers may bias the result."]
+        self.assertEqual(missing_coverage(question, passages), [])
+        self.assertEqual(missing_coverage(question, passages[:1]),
+                         [("Study B", "design"), ("Study B", "limitations")])
+        self.assertEqual(requested_coverage("Compare Study A and Study B designs.")[1], ["design"])
+        claims = [ClaimReviewResponse(text="Study C used a randomized design.", section="pdf",
+                  status="supported", supporting=[], opposing=[]),
+                  ClaimReviewResponse(text="Study D used a matched design.", section="pdf",
+                  status="supported", supporting=[], opposing=[]),
+                  ClaimReviewResponse(text="Study C randomized while Study D matched courses.", section="pdf",
+                  status="supported", supporting=[], opposing=[])]
+        self.assertEqual(_methodology_comparison_gaps("Compare Study C and Study D designs.", claims), [])
+        self.assertEqual(_methodology_comparison_gaps(
+            "Compare Study C and Study D designs and participants.", claims),
+            ["Study C's participants", "Study D's participants"])
+        self.assertEqual(_methodology_comparison_gaps(
+            "What were Study C's design and participants?", claims[:1]),
+            ["Study C's participants"])
+
+    def test_pdf_scoped_gap_does_not_trigger_external_search(self):
+        search = ExternalSearch()
+        self.client.app.state.external_search = search
+        provider = AssessedAnswers(EvidenceAssessment("none", []))
+        self.client.app.state.answer_provider = provider
+        response = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "Does this PDF report long-term outcomes?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "not_mentioned")
+        self.assertEqual(response.json()["search_trace"]["tavily_calls"], 0)
+        self.assertEqual(search.queries, [])
+        self.assertEqual(provider.external_calls, 0)
+        provider.assessment = EvidenceAssessment("partial", ["c0-hash-a"],
+            "Beta findings are not established.", [EvidenceQuote("c0-hash-a", "Alpha result")])
+        partial = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "What does this paper say about Alpha and Beta?"})
+        self.assertEqual(partial.status_code, 200)
+        self.assertEqual(partial.json()["assessment"]["level"], "partial")
+        self.assertEqual(partial.json()["sources"][0]["id"], "c0-hash-a")
+        self.assertIn("Beta findings", partial.json()["answer"])
+        self.assertEqual(search.queries, [])
+        self.assertTrue(_asks_only_about_pdf("What does this paper say about privacy?"))
+        self.assertFalse(_asks_only_about_pdf("What are the current legal requirements in India?"))
+        self.assertFalse(_asks_only_about_pdf("What does this paper say and what do external sources say?"))
+        self.assertFalse(_asks_only_about_pdf("What does this paper say, and what is the current law?"))
+
+    def test_retrieval_recovers_second_study_outside_dense_candidates(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        vectors = VectorRepository(Path(directory.name))
+        chunks = [TextChunk(index, index + 1,
+                    f"Study A used a randomized design with {200 + index} participants.", f"a{index}")
+                  for index in range(7)]
+        chunks.append(TextChunk(7, 8, "Study B used a matched-course comparison with 780 students.", "b7"))
+        chunks.append(TextChunk(8, 9, "Study B library opening hours and book lending.", "b8"))
+        vectors.save("alice", "paper-1", chunks, [[1.0, 0.0]] * 7 + [[0.0, 1.0]] * 2)
+        class FocusedEmbeddings:
+            def embed(self, questions):
+                return [[0.0, 1.0] if text.startswith("Study B") else [1.0, 0.0]
+                        for text in questions]
+        ingestion = Ingestion(vectors)
+        ingestion.embeddings = FocusedEmbeddings()
+        self.client.app.state.ingestion_service = ingestion
+        request = Request({"type": "http", "app": self.client.app})
+        user = UserResponse(id="alice", email="alice@example.com", role="user")
+        payload = SearchRequest(paper_id="paper-1",
+            question="Compare Study A and Study B designs and participants.")
+        initial = asyncio.run(_retrieve(payload, request, user))
+        with self.assertLogs("app.routers.research", level="INFO") as logs:
+            expanded = asyncio.run(_retrieve(payload, request, user, expand=True))
+        self.assertTrue(any("stage=initial" in line and "c7-b7" in line for line in logs.output))
+        self.assertFalse(any("Bob's alpha secret" in line for line in logs.output))
+        self.assertTrue(any(item.chunk_index == 7 for item in initial))
+        self.assertTrue(any(item.chunk_index == 7 for item in expanded))
+        self.assertFalse(any(item.chunk_index == 8 for item in expanded))
+        self.assertLessEqual(len(expanded), 10)
+        self.assertEqual(next(item.page_number for item in expanded if item.chunk_index == 7), 8)
+        self.assertTrue(all("Bob's" not in item.text for item in expanded))
+
+    def test_sufficient_assessment_is_downgraded_when_quote_misses_requested_part(self):
+        question = "Compare Study A and Study B designs and participants."
+        a = AnswerSource(id="cA", chunk_index=0, page_number=1, content_hash="a",
+            highlight_text="", text="Study A used a randomized design with 200 participants.")
+        b = AnswerSource(id="cB", chunk_index=1, page_number=2, content_hash="b",
+            highlight_text="", text="Study B used a matched design with 780 students.")
+        assessment = EvidenceAssessment("sufficient", ["cA", "cB"], supporting_quotes=[
+            EvidenceQuote("cA", "Study A used a randomized design with 200 participants."),
+            EvidenceQuote("cB", "Study B used a matched design")])
+        validated = _validate_assessment(assessment, question, {"cA": a, "cB": b})
+        self.assertEqual(validated.level, "partial")
+        self.assertIn("Study B participants", validated.missing_information)
+
     def test_partial_comparison_is_not_reported_as_a_complete_answer(self):
         question = ("Compare the methodologies used in Study A and Study B. "
                     "Explain their study designs, participants, and important methodological differences.")
@@ -293,38 +393,24 @@ class ResearchTests(unittest.TestCase):
                                   question="Compare privacy concerns in both studies")
         self.assertFalse(any("three universities" in item.text for item in passages))
 
-    def test_reported_calculations_use_dossier_inputs(self):
-        source_a = AnswerSource(id="c4-a", owner_id="alice", paper_id="paper-1", page_number=3,
-            chunk_index=4, content_hash="a", highlight_text="", document_name="paper.pdf",
-            text="Study A reports confirmed misconduct of 8% in monitored sections and 14% in "
-                 "unmonitored sections, a difference of 6 percentage points.")
-        source_b = AnswerSource(id="c8-b", owner_id="alice", paper_id="paper-1", page_number=5,
-            chunk_index=8, content_hash="b", highlight_text="", document_name="paper.pdf",
-            text="Dimension Study A (S-A) Study B (S-B) Design Cluster-randomized Matched, "
-                 "non-randomized Sample size 2,400 780")
-        sources = {item.id: item for item in (source_a, source_b)}
-        total = _reported_calculation("What is the combined number of participants in both studies?", sources)
-        self.assertIn("2,400 + 780 = 3,180", total[0])
-        self.assertIn("not one pooled experiment", total[0])
-        self.assertEqual(total[1], source_b.id)
-        difference = _reported_calculation("What was Study A's difference in misconduct rates?", sources)
-        self.assertIn("14% − 8% = 6 percentage points", difference[0])
-        self.assertEqual(difference[1], source_a.id)
-        self.assertIsNone(_reported_calculation("What is the p-value of Study B?", sources))
-
-    def test_alert_calculations_keep_confirmation_distinct_from_false_positives(self):
-        source = AnswerSource(id="c7-b", owner_id="alice", paper_id="paper-1", page_number=4,
-            chunk_index=7, content_hash="b", highlight_text="", document_name="paper.pdf",
-            text="Total automated alerts 120 Alerts associated with confirmed misconduct 9 "
-                 "Alerts not confirmed as misconduct 111 Share associated with confirmed misconduct 7.5% "
-                 "The authors caution that an unconfirmed alert does not necessarily mean the system made a technical error.")
-        for question in ("What proportion of alerts were confirmed?", "How many alerts were unconfirmed?",
-                         "Explain Study B's confirmed and unconfirmed alerts."):
-            answer = _reported_calculation(question, {source.id: source})
-            self.assertIn("120 − 9 = 111", answer[0])
-            self.assertIn("9 ÷ 120 × 100 = 7.5%", answer[0])
-            self.assertIn("not automatically a technical false positive", answer[0])
-            self.assertEqual(answer[1], source.id)
+    def test_calculated_answer_uses_the_same_claim_verifier_as_other_answers(self):
+        source = AnswerSource(id="c1-orbit", page_number=2, chunk_index=1, content_hash="orbit",
+            highlight_text="", text="Trial ORBIT reported rates of 8% in the first group and 14% in the second group.")
+        class Verifier:
+            def verify_claims(self, question, claims, evidence):
+                return [ClaimAssessment(claims[0]["id"], "supported", [
+                    ClaimQuote(source.id, source.text)], [])]
+        shown, _, reviews = asyncio.run(_verified_sections(Verifier(),
+            "What was the percentage-point difference?", "14% − 8% = 6 percentage points [c1-orbit].", "",
+            [source.id], [], {source.id: source}, {}))
+        self.assertEqual(reviews[0].status, "supported")
+        self.assertIn("6 percentage points", shown)
+        self.assertIn(f"[{source.id}]", shown)
+        bad, _, reviews = asyncio.run(_verified_sections(Verifier(),
+            "What was the percentage-point difference?", "14% − 8% = 9 percentage points [c1-orbit].", "",
+            [source.id], [], {source.id: source}, {}))
+        self.assertEqual(reviews[0].status, "unsupported")
+        self.assertNotIn("9 percentage points", bad)
 
     def test_explicit_pdf_gaps_do_not_block_correct_routing(self):
         legal = AnswerSource(id="c9-a", owner_id="alice", paper_id="paper-1", page_number=5,
@@ -340,8 +426,7 @@ class ResearchTests(unittest.TestCase):
             text="Facial recognition performance Not studied.")
         direct = _validate_assessment(EvidenceAssessment("none", [], "", []),
             "Was facial recognition accuracy studied?", {facial.id: facial})
-        self.assertEqual(direct.level, "sufficient")
-        self.assertEqual(direct.chunk_ids, [facial.id])
+        self.assertEqual(direct.level, "none")
 
     def test_display_citation_maps_to_stable_chunk_before_verification(self):
         source = AnswerSource(id="c6-study-b", owner_id="alice", paper_id="paper-1", page_number=4,
@@ -387,7 +472,8 @@ class ResearchTests(unittest.TestCase):
                 proposed = EvidenceAssessment("sufficient", expected_ids, supporting_quotes=[
                     EvidenceQuote(item, sources[item].text) for item in expected_ids])
                 result = _validate_assessment(proposed, question, sources)
-                self.assertEqual(result.level, "sufficient")
+                self.assertEqual(result.level,
+                    "partial" if question.startswith("Compare Study A and Study B") else "sufficient")
                 self.assertEqual(result.chunk_ids, expected_ids)
                 absent = _validate_assessment(EvidenceAssessment("none", []), question, sources)
                 self.assertFalse(absent and absent.level == "sufficient")
@@ -404,13 +490,11 @@ class ResearchTests(unittest.TestCase):
             chunk_index=6, content_hash="study-b", highlight_text="", document_name="dossier.pdf",
             text="5. Study B: Monitoring and student trust Setting: 3 universities in one country "
                  "Participants: 780 students across 26 online courses Design: Quasi-experimental comparison")
-        result = _validate_assessment(EvidenceAssessment("none", []),
+        result = _validate_assessment(EvidenceAssessment("sufficient", [source.id],
+            supporting_quotes=[EvidenceQuote(source.id, source.text)]),
             "How many students, universities and courses participated in Study B?", {source.id: source})
         self.assertEqual(result.level, "sufficient")
         self.assertEqual(result.chunk_ids, [source.id])
-        direct = _reported_calculation(
-            "How many students, universities and courses participated in Study B?", {source.id: source})
-        self.assertIn("780 students across 3 universities and 26 online courses", direct[0])
 
     def test_generalizability_uses_two_pdf_chunks_without_external_search(self):
         directory = tempfile.TemporaryDirectory()
@@ -646,7 +730,7 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(response.json()["search_trace"]["fallback_searches"], 0)
         self.assertIn("does not establish that no external information exists", response.json()["answer"])
 
-    def test_explicit_sample_size_overrides_wrong_none_without_web_search(self):
+    def test_sample_size_does_not_bypass_wrong_none_assessment(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         vectors = VectorRepository(Path(directory.name))
@@ -659,8 +743,8 @@ class ResearchTests(unittest.TestCase):
         response = self.client.post("/api/v1/research/ask", json={
             "paper_id": "paper-1", "question": "What was the sample size of the study?"})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["assessment"]["level"], "sufficient")
-        self.assertIn("412 students", response.json()["answer"])
+        self.assertEqual(response.json()["assessment"]["level"], "none")
+        self.assertNotIn("412 students", response.json()["answer"])
         self.assertEqual(search.queries, [])
 
     def test_sample_size_shortcut_does_not_omit_other_requested_facts(self):
@@ -767,6 +851,148 @@ class ResearchTests(unittest.TestCase):
         self.assertIsNone(_validate_assessment(malformed, "Did monitoring reduce misconduct?", {"c0": source}))
         self.assertIsNone(_validate_assessment(unknown, "Did monitoring reduce misconduct?", {"c0": source}))
 
+    def test_assessment_rejection_logs_only_structured_metadata(self):
+        source = AnswerSource(id="c0", chunk_index=0, page_number=2,
+            text="Private passage: monitoring reduced misconduct among students.",
+            content_hash="a", highlight_text="")
+        cases = [
+            (EvidenceAssessment("invalid", ["c0"]), "invalid_assessment_level", 1, 0),
+            (EvidenceAssessment("sufficient", ["unknown"], supporting_quotes=[
+                EvidenceQuote("unknown", "Private invented quotation")]), "unknown_source_id", 1, 1),
+            (EvidenceAssessment("sufficient", ["c0"]), "missing_supporting_quote", 1, 0),
+            (EvidenceAssessment("sufficient", ["c0"], supporting_quotes=[
+                EvidenceQuote("c0", "Private invented quotation")]),
+                "quote_not_found_or_order_mismatch", 1, 1),
+        ]
+        for assessment, reason, cited_count, quote_count in cases:
+            with self.subTest(reason=reason), self.assertLogs("app.routers.research", level="INFO") as logs:
+                self.assertIsNone(_validate_assessment(assessment, "Private question", {"c0": source},
+                                                        request_id="req-123"))
+            self.assertEqual(len(logs.output), 1)
+            entry = logs.output[0]
+            for expected in ("request_id=req-123", f"reason={reason}", "retrieved_sources=1",
+                             f"cited_source_ids={cited_count}", f"supporting_quotes={quote_count}"):
+                self.assertIn(expected, entry)
+            self.assertNotIn("Private passage", entry)
+            self.assertNotIn("Private question", entry)
+            self.assertNotIn("Private invented quotation", entry)
+
+    def test_assessment_rejection_correlates_with_ask_request(self):
+        self.client.app.state.answer_provider = AssessedAnswers(EvidenceAssessment(
+            "sufficient", ["unknown"], supporting_quotes=[
+                EvidenceQuote("unknown", "Private invented quotation")]))
+        with self.assertLogs("app.routers.research", level="INFO") as logs:
+            response = self.client.post("/api/v1/research/ask", json={
+                "paper_id": "paper-1", "question": "Private question", "request_id": "req-456"})
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"],
+                         "The PDF evidence assessment could not be validated. Try again later.")
+        rejected = [entry for entry in logs.output if "evidence_assessment_rejected" in entry]
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("request_id=req-456 reason=unknown_source_id level=sufficient", rejected[0])
+        self.assertIn("retrieved_sources=2 cited_source_ids=1 supporting_quotes=1", rejected[0])
+        self.assertNotIn("Private question", "\n".join(logs.output))
+        self.assertNotIn("Private invented quotation", "\n".join(logs.output))
+
+    def test_claim_review_logs_statuses_reasons_and_source_ids_without_content(self):
+        first = AnswerSource(id="c0", chunk_index=0, page_number=1, content_hash="a",
+            highlight_text="", text="Private source passage. Alpha result was observed. "
+                                    "Privacy concern was reported. Monitoring increased integrity.")
+        second = AnswerSource(id="c1", chunk_index=1, page_number=2, content_hash="b",
+            highlight_text="", text="Monitoring decreased integrity.")
+        class Verifier:
+            def verify_claims(self, question, claims, evidence):
+                return [
+                    ClaimAssessment(claims[0]["id"], "supported", [
+                        ClaimQuote("c0", "Alpha result was observed")], []),
+                    ClaimAssessment(claims[1]["id"], "partially_supported", [
+                        ClaimQuote("c0", "Privacy concern was reported")], [],
+                        "Private provider explanation"),
+                    ClaimAssessment(claims[2]["id"], "unsupported", [], []),
+                    ClaimAssessment(claims[3]["id"], "contradicted", [
+                        ClaimQuote("c0", "Monitoring increased integrity")], [
+                        ClaimQuote("c1", "Monitoring decreased integrity")]),
+                ]
+        answer = ("Alpha result was observed [c0]. Privacy concern was reported [c0]. "
+                  "Unmeasured impact was established [c0]. Monitoring changed integrity [c0].")
+        with self.assertLogs("uvicorn.error", level="INFO") as logs:
+            _, _, reviews = asyncio.run(_verified_sections(Verifier(), "Private question", answer,
+                "", ["c0", "c1"], [], {"c0": first, "c1": second}, {}, request_id="req-789"))
+        self.assertEqual([item.status for item in reviews],
+                         ["supported", "partially_supported", "unsupported", "contradicted"])
+        entries = [entry for entry in logs.output if "research_claim_review" in entry]
+        self.assertEqual(len(entries), 4)
+        for index, (entry, status, reason) in enumerate(zip(entries,
+                ["supported", "partially_supported", "unsupported", "contradicted"],
+                ["accepted", "provider_partial", "provider_unsupported", "verified_contradiction"]), start=1):
+            self.assertIn(f"request_id=req-789 claim_index={index} status={status}", entry)
+            self.assertIn(f"reason={reason}", entry)
+        self.assertIn("supporting_source_ids=['c0'] opposing_source_ids=['c1']", entries[3])
+        self.assertIn("supporting_source_ids=[] opposing_source_ids=[]", entries[2])
+        for secret in ("Private question", "Private source passage", "Private provider explanation",
+                       "Unmeasured impact was established", "Monitoring increased integrity"):
+            self.assertNotIn(secret, "\n".join(entries))
+
+    def test_claim_review_logs_validation_rejection_code(self):
+        source = AnswerSource(id="c0", chunk_index=0, page_number=1, content_hash="a",
+            highlight_text="", text="The rate was 12 percent.")
+        class Verifier:
+            def verify_claims(self, question, claims, evidence):
+                return [ClaimAssessment(claims[0]["id"], "supported", [
+                    ClaimQuote("c0", "The rate was 12 percent")], [])]
+        with self.assertLogs("uvicorn.error", level="INFO") as logs:
+            _, _, reviews = asyncio.run(_verified_sections(Verifier(), "What was the rate?",
+                "The rate was 13 percent [c0].", "", ["c0"], [], {"c0": source}, {},
+                request_id="req-790"))
+        self.assertEqual(reviews[0].status, "unsupported")
+        self.assertIn("status=unsupported", logs.output[0])
+        self.assertIn("reason=numeric_mismatch", logs.output[0])
+        self.assertNotIn("13 percent", logs.output[0])
+
+    def test_local_debug_maps_claim_index_to_generated_text(self):
+        source = AnswerSource(id="c0", chunk_index=0, page_number=1, content_hash="a",
+            highlight_text="", text="Private PDF passage. The study enrolled 120 students. "
+                                    "The paper mentions an outcome measure.")
+        answer = ("The study enrolled 120 students [c0]. "
+                  "The study included an outcome measure [c0]. "
+                  "The study may describe the outcome incompletely [c0]. "
+                  "The study had no unreported limitations [c0].")
+        class Verifier:
+            def verify_claims(self, question, claims, evidence):
+                return [ClaimAssessment(claim["id"],
+                    "partially_supported" if index == 2 else "supported",
+                    [ClaimQuote("c0", "The paper mentions an outcome measure")], [],
+                    "The outcome is mentioned but its result is not established." if index == 2 else "")
+                    for index, claim in enumerate(claims)]
+        expected = split_claims(answer, "")[2].text
+        with self.assertLogs("uvicorn.error", level="DEBUG") as logs:
+            _, _, reviews = asyncio.run(_verified_sections(Verifier(), "What did the paper report?",
+                answer, "", ["c0"], [], {"c0": source}, {}, request_id="req-debug",
+                debug_claims=True))
+        debug_entries = [entry for entry in logs.output if "research_claim_debug" in entry]
+        self.assertEqual(len(debug_entries), 4)
+        self.assertIn("claim_index=3", debug_entries[2])
+        self.assertIn(f"claim_text={expected!r}", debug_entries[2])
+        self.assertIn("status=partially_supported", debug_entries[2])
+        self.assertIn("supporting_source_ids=['c0'] opposing_source_ids=[]", debug_entries[2])
+        self.assertIn("provider_explanation='The outcome is mentioned but its result is not established.'",
+                      debug_entries[2])
+        self.assertIn("reason=provider_partial", debug_entries[2])
+        self.assertNotIn("Private PDF passage", "\n".join(debug_entries))
+        self.assertEqual(len(reviews), 4)
+        with self.assertLogs("uvicorn.error", level="INFO") as normal_logs:
+            asyncio.run(_verified_sections(Verifier(), "What did the paper report?",
+                answer, "", ["c0"], [], {"c0": source}, {}, request_id="req-normal"))
+        self.assertFalse(any("research_claim_debug" in entry for entry in normal_logs.output))
+
+    def test_local_claim_debug_requires_loopback_and_debug_level(self):
+        loopback = Request({"type": "http", "client": ("127.0.0.1", 1234), "app": self.client.app})
+        remote = Request({"type": "http", "client": ("203.0.113.9", 1234), "app": self.client.app})
+        with self.assertLogs("uvicorn.error", level="DEBUG"):
+            self.assertTrue(_local_claim_debug(loopback))
+            self.assertFalse(_local_claim_debug(remote))
+            logging.getLogger("uvicorn.error").debug("local_debug_gate_test")
+
     def test_comparison_keeps_two_valid_study_passages_when_table_quote_reorders_text(self):
         sources = {
             "cA": AnswerSource(id="cA", chunk_index=1, page_number=3, content_hash="a",
@@ -783,8 +1009,9 @@ class ResearchTests(unittest.TestCase):
             EvidenceQuote("cTable", "Design Cluster-randomized ... Study B ... Matched-course comparison")])
         with self.assertLogs("app.routers.research", level="INFO") as captured:
             result = _validate_assessment(assessment, question, sources)
-        self.assertEqual(result.chunk_ids, ["cA", "cB"])
-        self.assertTrue(any("source_id=cTable" in line for line in captured.output))
+        self.assertIsNone(result)
+        self.assertTrue(any("reason=quote_not_found_or_order_mismatch" in line
+                            for line in captured.output))
         missing_b = EvidenceAssessment("sufficient", ["cA", "cTable"], supporting_quotes=[
             EvidenceQuote("cA", "Study A participants: 2,400 students"),
             EvidenceQuote("cTable", "Design Cluster-randomized ... Study B ... Matched-course comparison")])
@@ -807,8 +1034,7 @@ class ResearchTests(unittest.TestCase):
             "cA", "Participants: 2,400 undergraduate students Design: Cluster-randomized comparison "
                   "Setting: 12 universities in three regions")])
         partial = _validate_assessment(reordered, question, {"cA": source})
-        self.assertEqual(partial.level, "partial")
-        self.assertIn("Study B", partial.missing_information)
+        self.assertIsNone(partial)
         fabricated = EvidenceAssessment("sufficient", ["cA"], supporting_quotes=[EvidenceQuote(
             "cA", "Participants: 2,500 undergraduate students Design: Cluster-randomized comparison "
                   "Setting: 12 universities in three regions")])
@@ -880,6 +1106,9 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(_question_with_context("why we use ?", {
             "messages": [{"question": "What is useMemo?"}]
         }), "Why do we use useMemo?")
+        self.assertEqual(_question_with_context("What did Trial ORBIT report?", {
+            "messages": [{"question": "What did the Northstar cohort report?"}]
+        }), "What did Trial ORBIT report?")
 
     def test_vague_follow_up_retrieves_using_previous_subject(self):
         directory = tempfile.TemporaryDirectory()
