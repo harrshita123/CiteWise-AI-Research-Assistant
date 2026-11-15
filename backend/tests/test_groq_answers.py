@@ -9,6 +9,26 @@ from app.providers.external_search import TavilyExternalSearch
 
 
 class GroqAnswerTests(unittest.TestCase):
+    def test_calibration_uses_existing_generation_and_verification_calls(self):
+        provider = GroqAnswerProvider("test-key", "model", 10)
+        with patch.object(provider, "_complete", side_effect=[
+            {"status": "answered", "text": "A qualified finding [c1].", "evidence_ids": ["c1"]},
+            {"claims": [{"claim_id": "claim-1", "status": "partially_supported",
+                         "supporting": [{"source_id": "c1", "quote": "The survey observed a difference"}],
+                         "opposing": [], "explanation": "The causal interpretation is not established."}]},
+        ]) as complete:
+            provider.generate("What did the survey find?", [Evidence("c1", "The survey observed a difference.")])
+            provider.verify_claims("What did the survey find?", [{"id": "claim-1",
+                "text": "The survey proved a causal effect", "section": "pdf", "cited_ids": ["c1"]}],
+                [Evidence("c1", "The survey observed a difference.")])
+        self.assertEqual(complete.call_count, 2)
+        generation_prompt = complete.call_args_list[0].args[2]
+        verification_prompt = complete.call_args_list[1].args[2]
+        self.assertIn("numerical differences as differences", generation_prompt)
+        self.assertIn("missing test is unknown", generation_prompt)
+        self.assertIn("author's interpretation", verification_prompt)
+        self.assertIn("does not alone establish causation", verification_prompt)
+
     def test_structured_claim_verification_request(self):
         provider = GroqAnswerProvider("test-key", "openai/gpt-oss-120b", 120)
         response = Mock(status_code=200)
