@@ -28,6 +28,136 @@ class ClaimVerificationTests(unittest.TestCase):
         self.assertEqual(result.status, "supported")
         self.assertIn("[c1]", present_claims([result], "pdf"))
 
+    def test_measured_difference_does_not_establish_significance(self):
+        source = Evidence("c-rate", "Trial Meridian observed 18% versus 12% improvement. "
+                          "No significance test was reported.")
+        claim = split_claims("Trial Meridian found a statistically significant difference [c-rate].", "")[0]
+        quote = ClaimQuote(source.id, "Trial Meridian observed 18% versus 12% improvement")
+        for proposed_status in ("supported", "partially_supported"):
+            reviewed = review_claims([claim], [ClaimAssessment(claim.id, proposed_status, [quote], [])], [source])[0]
+            self.assertEqual(reviewed.status, "partially_supported")
+            self.assertNotIn("statistically significant", present_claims([reviewed], "pdf"))
+        direct = split_claims("Trial Meridian observed 18% versus 12% improvement [c-rate].", "")[0]
+        accepted = review_claims([direct], [ClaimAssessment(direct.id, "supported", [quote], [])], [source])[0]
+        self.assertEqual(accepted.status, "supported")
+        proof = split_claims("Trial Meridian proved the intervention improved outcomes [c-rate].", "")[0]
+        overstated = review_claims([proof], [ClaimAssessment(proof.id, "supported", [quote], [])], [source])[0]
+        self.assertEqual(overstated.status, "partially_supported")
+
+    def test_association_does_not_establish_causation(self):
+        source = Evidence("c-cohort", "The Delta cohort found screen time associated with shorter sleep.")
+        quote = ClaimQuote(source.id, source.text)
+        causal = split_claims("Screen time caused shorter sleep in the Delta cohort [c-cohort].", "")[0]
+        reviewed = review_claims([causal], [ClaimAssessment(causal.id, "supported", [quote], [])], [source])[0]
+        self.assertEqual(reviewed.status, "partially_supported")
+        self.assertEqual(reviewed.reason_code, "inference_scope_mismatch")
+        qualified = split_claims("The Delta cohort found an association without establishing causation [c-cohort].", "")[0]
+        calibrated = review_claims([qualified], [ClaimAssessment(qualified.id, "supported", [quote], [])], [source])[0]
+        self.assertEqual(calibrated.status, "supported")
+
+    def test_measurement_does_not_alone_establish_effectiveness(self):
+        source = Evidence("c-training", "The training group completed 14 tasks; the comparison group completed 10.")
+        claim = split_claims("The training was effective [c-training].", "")[0]
+        quote = ClaimQuote(source.id, source.text)
+        overconfident = review_claims([claim], [ClaimAssessment(claim.id, "supported", [quote], [])], [source])[0]
+        self.assertEqual(overconfident.status, "partially_supported")
+        self.assertNotIn("was effective", present_claims([overconfident], "pdf"))
+        explicit = Evidence("c-author", "The authors interpreted the training as effective for task completion.")
+        interpreted = split_claims("The authors interpreted the training as effective for task completion [c-author].", "")[0]
+        supported = review_claims([interpreted], [ClaimAssessment(interpreted.id, "supported", [
+            ClaimQuote(explicit.id, explicit.text)], [])], [explicit])[0]
+        self.assertEqual(supported.status, "supported")
+        negated = Evidence("c-negative", "The authors concluded that the training was not effective.")
+        overstated = split_claims("The training was effective [c-negative].", "")[0]
+        rejected = review_claims([overstated], [ClaimAssessment(overstated.id, "supported", [
+            ClaimQuote(negated.id, negated.text)], [])], [negated])[0]
+        self.assertNotEqual(rejected.status, "supported")
+
+    def test_conflicting_findings_and_missing_statistic_keep_their_qualifications(self):
+        higher = Evidence("c-sleep-a", "The first survey found higher sleep quality among night-shift workers.")
+        lower = Evidence("c-sleep-b", "The second survey found lower sleep quality among night-shift workers.")
+        claim = split_claims("The surveys report conflicting sleep quality findings [c-sleep-a].", "")[0]
+        reviewed = review_claims([claim], [ClaimAssessment(claim.id, "contradicted", [
+            ClaimQuote(higher.id, higher.text)], [ClaimQuote(lower.id, lower.text)])], [higher, lower])[0]
+        self.assertEqual(reviewed.status, "contradicted")
+        self.assertIn("[c-sleep-b]", present_claims([reviewed], "pdf"))
+        missing = Evidence("c-review", "The review summarized themes but did not report a p-value.")
+        gap = split_claims("The review did not report a p-value [c-review].", "")[0]
+        gap_review = review_claims([gap], [ClaimAssessment(gap.id, "supported", [
+            ClaimQuote(missing.id, missing.text)], [])], [missing])[0]
+        self.assertEqual(gap_review.status, "supported")
+
+    def test_independent_contrast_keeps_supported_clause_and_withholds_overclaim(self):
+        source = Evidence("c-pilot", "The field study did not establish whether the program worked.")
+        claims = split_claims("The field study did not establish whether the program worked, "
+                              "but the program was effective [c-pilot].", "")
+        self.assertEqual(len(claims), 2)
+        self.assertEqual([item.cited_ids for item in claims], [[source.id], [source.id]])
+        proposals = [ClaimAssessment(item.id, "supported", [ClaimQuote(source.id, source.text)], [])
+                     for item in claims]
+        reviewed = review_claims(claims, proposals, [source])
+        self.assertEqual([item.status for item in reviewed], ["supported", "unsupported"])
+        shown = present_claims(reviewed, "pdf")
+        self.assertIn("did not establish", shown)
+        self.assertNotIn("was effective", shown)
+
+    def test_partial_quote_must_address_the_claimed_outcome(self):
+        relevant = Evidence("c-health", "Mortality fell among patients receiving the intervention.")
+        unrelated = Evidence("c-attendance", "Attendance rose after the intervention.")
+        for source, expected in ((relevant, "partially_supported"), (unrelated, "unsupported")):
+            claim = split_claims(f"The intervention was effective at reducing mortality [{source.id}].", "")[0]
+            review = review_claims([claim], [ClaimAssessment(claim.id, "supported", [
+                ClaimQuote(source.id, source.text)], [])], [source])[0]
+            self.assertEqual(review.status, expected)
+            if source is unrelated:
+                self.assertNotIn("Attendance rose", present_claims([review], "pdf"))
+
+    def test_statistical_evidence_can_use_p_values_or_confidence_intervals(self):
+        cases = [
+            ("Review Rhea found a statistically significant reduction in stroke incidence",
+             "Review Rhea found lower stroke incidence: pooled risk ratio 0.72 (95% CI 0.61 to 0.85).",
+             "supported"),
+            ("Study Ossa found a statistically significant change in water quality",
+             "Study Ossa measured a change in water quality (p = 0.03).", "supported"),
+            ("Review Rhea found a statistically significant reduction in stroke incidence",
+             "Review Rhea found lower stroke incidence: pooled risk ratio 0.72 (95% CI 0.61 to 1.05).",
+             "partially_supported"),
+            ("Study Ossa found a statistically significant change in water quality",
+             "Study Ossa measured an attendance change (p = 0.03).", "unsupported"),
+        ]
+        for index, (statement, passage, expected) in enumerate(cases):
+            with self.subTest(index=index):
+                source = Evidence(f"c-stat-{index}", passage)
+                claim = split_claims(f"{statement} [{source.id}].", "")[0]
+                review = review_claims([claim], [ClaimAssessment(claim.id, "supported", [
+                    ClaimQuote(source.id, source.text)], [])], [source])[0]
+                self.assertEqual(review.status, expected)
+
+    def test_design_and_reported_interpretation_preserve_supported_conclusions(self):
+        observational = Evidence("c-cohort-x", "Cohort Vega observed exposure associated with lower lung function.")
+        randomized = Evidence("c-trial-x", "Trial Sol randomized patients to treatment or control; "
+                              "mortality was lower with treatment (p = 0.03).")
+        for source, expected in ((observational, "partially_supported"), (randomized, "supported")):
+            text = ("Exposure caused lower lung function" if source is observational else
+                    "Treatment caused lower mortality")
+            claim = split_claims(f"{text} [{source.id}].", "")[0]
+            review = review_claims([claim], [ClaimAssessment(claim.id, "supported", [
+                ClaimQuote(source.id, source.text)], [])], [source])[0]
+            self.assertEqual(review.status, expected)
+        qualitative = Evidence("c-interview", "Interview participants described peer support as helpful for coping.")
+        synthesis = Evidence("c-synthesis", "The systematic review concluded peer support improved coping in most studies.")
+        for source, text in ((qualitative, "Participants described peer support as effective for coping"),
+                             (synthesis, "The review interpreted peer support as effective for coping")):
+            claim = split_claims(f"{text} [{source.id}].", "")[0]
+            review = review_claims([claim], [ClaimAssessment(claim.id, "supported", [
+                ClaimQuote(source.id, source.text)], [])], [source])[0]
+            self.assertEqual(review.status, "supported")
+        negative = Evidence("c-negative-interview", "Interview participants described peer support as unhelpful for coping.")
+        claim = split_claims("Participants described peer support as effective for coping [c-negative-interview].", "")[0]
+        review = review_claims([claim], [ClaimAssessment(claim.id, "supported", [
+            ClaimQuote(negative.id, negative.text)], [])], [negative])[0]
+        self.assertNotEqual(review.status, "supported")
+
     def test_numeric_validation_ignores_only_citation_markers(self):
         quote = ClaimQuote("c4-7afe1c5514ef", "The study included 2,400 students")
         self.assertTrue(_numbers_supported("The study included 2,400 students [c4-7afe1c5514ef]", [quote]))
@@ -413,6 +543,60 @@ class ClaimVerificationTests(unittest.TestCase):
                     for claim, quote in zip(claims, quotes)]
         reviewed = review_claims(claims, proposed, evidence)
         self.assertEqual([item.status for item in reviewed], ["supported"] * 4)
+
+    def test_named_trial_clauses_keep_source_and_withhold_wrong_population(self):
+        evidence = [Evidence("c-orbit", "Trial ORBIT used a randomized design and included 90 patients.")]
+        claims = split_claims("Trial ORBIT used a randomized design, and included 100 patients [c-orbit].", "")
+        self.assertEqual(len(claims), 2)
+        self.assertEqual([item.cited_ids for item in claims], [["c-orbit"], ["c-orbit"]])
+        proposals = [ClaimAssessment(item.id, "supported", [ClaimQuote("c-orbit", evidence[0].text)], [])
+                     for item in claims]
+        reviewed = review_claims(claims, proposals, evidence)
+        self.assertEqual([item.status for item in reviewed], ["supported", "unsupported"])
+        self.assertNotIn("100 patients", present_claims(reviewed, "pdf"))
+
+    def test_repeated_contrasts_keep_independent_claims_and_local_citations(self):
+        text = ("The survey reported improved attendance [c-attend], but the authors did not establish causation "
+                "[c-caution], but the program proved effective [c-claim].")
+        claims = split_claims(text, "")
+        self.assertEqual(len(claims), 3)
+        self.assertEqual([claim.cited_ids for claim in claims],
+                         [["c-attend"], ["c-caution"], ["c-claim"]])
+        sources = [Evidence("c-attend", "The survey reported improved attendance."),
+                   Evidence("c-caution", "The authors did not establish causation."),
+                   Evidence("c-claim", "The program reported improved attendance.")]
+        proposed = [ClaimAssessment(claim.id, "supported", [ClaimQuote(claim.cited_ids[0], source.text)], [])
+                    for claim, source in zip(claims, sources)]
+        reviewed = review_claims(claims, proposed, sources)
+        self.assertEqual([item.status for item in reviewed],
+                         ["supported", "supported", "unsupported"])
+
+    def test_significance_and_causation_must_match_claimed_outcome(self):
+        source = Evidence("c-mixed", "A randomized trial found attendance improved (p = 0.03), "
+                          "while mortality was unchanged.")
+        for text in ("The trial found a statistically significant reduction in mortality",
+                     "The treatment caused lower mortality"):
+            with self.subTest(text=text):
+                claim = split_claims(f"{text} [c-mixed].", "")[0]
+                reviewed = review_claims([claim], [ClaimAssessment(claim.id, "supported", [
+                    ClaimQuote(source.id, source.text)], [])], [source])[0]
+                self.assertNotEqual(reviewed.status, "supported")
+
+    def test_relevant_partial_requires_matching_proposition_and_direction(self):
+        relevant = Evidence("c-lower", "Mortality fell after the intervention, but no test was reported.")
+        unrelated = Evidence("c-upper", "Mortality rose after the intervention.")
+        for source, expected in ((relevant, "partially_supported"), (unrelated, "unsupported")):
+            claim = split_claims(f"The intervention was effective at reducing mortality [{source.id}].", "")[0]
+            result = review_claims([claim], [ClaimAssessment(claim.id, "supported", [
+                ClaimQuote(source.id, source.text)], [])], [source])[0]
+            self.assertEqual(result.status, expected)
+
+    def test_uncertain_qualitative_interpretation_is_not_an_established_effect(self):
+        source = Evidence("c-interview-u", "Interviews described the peer program as uncertain for coping.")
+        claim = split_claims("The peer program was effective for coping [c-interview-u].", "")[0]
+        result = review_claims([claim], [ClaimAssessment(claim.id, "supported", [
+            ClaimQuote(source.id, source.text)], [])], [source])[0]
+        self.assertNotEqual(result.status, "supported")
 
     def test_one_unsupported_compound_fact_does_not_erase_other_facts(self):
         evidence = [Evidence("cA", "Study A setting: 12 universities. Participants: 2,400 students. "

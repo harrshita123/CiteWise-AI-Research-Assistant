@@ -9,6 +9,7 @@ from datetime import date
 from typing import Literal
 
 from ..providers.answers import ClaimAssessment, ClaimQuote, Evidence
+from .research_subjects import subject_spans
 
 
 ClaimStatus = Literal["supported", "partially_supported", "unsupported", "contradicted"]
@@ -21,6 +22,7 @@ _NUMERIC_CITATION = re.compile(
     re.I,
 )
 _FACT_VERB = r"(?:used|employed|included|enrolled|involved|comprised|was conducted|was carried out|lasted|spanned)"
+_CLAUSE_VERB = r"(?:is|are|was|were|has|have|had|do|does|did|can|could|found|reported|observed|showed|concluded|suggested|indicated|demonstrated|proved|caused|improved|reduced|increased|decreased|remained)"
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +41,22 @@ class ReviewedClaim:
     supporting: list[ClaimQuote]
     opposing: list[ClaimQuote]
     explanation: str
+    reason_code: str = "accepted"
+
+
+def _independent_clauses(text: str) -> list[str]:
+    """Separate explicit independent assertions, preserving dependent qualifications."""
+    boundary = re.compile(r",?\s+(?:but|however|whereas|and)\s+", re.I)
+    pieces, start = [], 0
+    for match in boundary.finditer(text):
+        left, right = text[start:match.start()].strip(), text[match.end():].strip()
+        if (not left or re.search(r"\bnot only\b", left, re.I)
+                or not re.match(rf"(?:[A-Za-z][\w'-]*\s+){{1,6}}{_CLAUSE_VERB}\b", right, re.I)):
+            continue
+        pieces.append(left)
+        start = match.end()
+    pieces.append(text[start:].strip())
+    return [piece for piece in pieces if piece]
 
 
 def split_claims(pdf_text: str, external_text: str) -> list[Claim]:
@@ -58,16 +76,29 @@ def split_claims(pdf_text: str, external_text: str) -> list[Claim]:
             plain = _PAREN_SOURCE_CITATION.sub("", _CITATION.sub("", part)).strip()
             if not plain:
                 continue
-            # Split only a parallel list of independent facts about one explicit
-            # subject. Keep the shared subject and sentence citation on each fact.
-            subject = re.match(rf"^(Study\s+[A-Za-z0-9]+|The\s+(?:study|trial|paper))\s+{_FACT_VERB}\b",
-                               plain, re.I)
-            clauses = re.split(rf",\s+(?:and\s+)?(?={_FACT_VERB}\b)", plain, flags=re.I) if subject else [plain]
-            for index, clause in enumerate(clauses):
-                statement = clause.strip()
-                if index:
-                    statement = f"{subject.group(1)} {statement}"
-                claims.append(Claim(f"claim-{len(claims) + 1}", statement, section, cited.copy()))
+            # An explicit citation beside a clause belongs to that clause. A
+            # sentence-final citation remains shared when no local one exists.
+            raw_clauses = _independent_clauses(part)
+            trailing = _CITATION.findall(raw_clauses[-1]) + _PAREN_SOURCE_CITATION.findall(raw_clauses[-1])
+            for raw in raw_clauses:
+                independent = _PAREN_SOURCE_CITATION.sub("", _CITATION.sub("", raw)).strip()
+                local = list(dict.fromkeys(_CITATION.findall(raw) + _PAREN_SOURCE_CITATION.findall(raw)))
+                clause_citations = local or (trailing if len(raw_clauses) > 1 else cited)
+                # Keep the shared subject for parallel facts; each part retains
+                # the sentence citation but receives its own verification.
+                named = subject_spans(independent)
+                subject = (named[0][0] if named and named[0][1] == 0
+                           and re.match(rf"\s+{_FACT_VERB}\b", independent[named[0][2]:], re.I) else None)
+                if subject is None:
+                    generic = re.match(rf"^(The\s+(?:study|trial|paper|cohort|experiment))\s+{_FACT_VERB}\b",
+                                       independent, re.I)
+                    subject = generic.group(1) if generic else None
+                clauses = re.split(rf",\s+(?:and\s+)?(?={_FACT_VERB}\b)", independent, flags=re.I) if subject else [independent]
+                for index, clause in enumerate(clauses):
+                    statement = clause.strip()
+                    if index:
+                        statement = f"{subject} {statement}"
+                    claims.append(Claim(f"claim-{len(claims) + 1}", statement, section, clause_citations.copy()))
     return claims
 
 
@@ -142,7 +173,9 @@ def _explicit_opposition(support: list[ClaimQuote], oppose: list[ClaimQuote]) ->
                     or re.search(r"\bnot\s+significant\b", first.quote, re.I)
                     or re.search(r"\bnot\s+significant\b", second.quote, re.I)):
                 continue
-            population = lambda text: re.search(r"\bamong\s+([\w-]+(?:\s+[\w-]+){0,3}\s+students)\b",
+            population = lambda text: re.search(r"\bamong\s+([\w-]+(?:\s+[\w-]+){0,3}\s+"
+                                                r"(?:students?|patients?|adults?|participants?|workers?|"
+                                                r"respondents?|children|cohorts?))\b",
                                                 text, re.I)
             first_population, second_population = population(first.quote), population(second.quote)
             if (first_population and second_population
@@ -186,6 +219,147 @@ def _legal_scope_supported(claim: str, support: list[ClaimQuote]) -> bool:
     return True
 
 
+def _inference_scope_supported(claim: str, support: list[ClaimQuote]) -> bool:
+    """Require explicit evidence for strong inferential wording, beyond a measurement alone."""
+    quoted = " ".join(item.quote for item in support)
+    if not quoted:
+        return False
+    related = _relevant_passages(claim, support)
+    scoped = " ".join(related)
+    # Claims explicitly saying an effect is *not* established are qualifications.
+    qualification = re.search(
+        r"\b(?:does not|did not|cannot|can't|not|no evidence to)\s+"
+        r"(?:\w+\s+){0,4}(?:establish|prove|demonstrate|show|confirm)\b", claim, re.I)
+    qualified = bool(qualification and not re.search(r"\b(?:but|however|and)\b",
+                                                     claim[qualification.end():], re.I))
+    negative_significance = re.search(
+        r"\b(?:not|non|no|without(?: an?)?)\s+(?:statistically\s+)?significant\b", claim, re.I)
+    if negative_significance and not re.search(
+            r"\b(?:not|non|no)\s+(?:statistically\s+)?significant\b", quoted, re.I):
+        return False
+    significant = re.search(r"\bstatistically significant\b|\bsignificant (?:effect|difference|association)\b",
+                            claim, re.I)
+    if significant and not (qualified or negative_significance):
+        if not _statistical_support(scoped):
+            return False
+        if not re.search(r"\bstatistically significant\b|\bsignificant (?:effect|difference|association)\b",
+                         scoped, re.I) and not _relevant_partial_support(claim, support):
+            return False
+    if not qualified and re.search(r"\b(?:proves?|proved|proof)\b", claim, re.I) and not re.search(
+            r"\b(?:proves?|proved|proof)\b", quoted, re.I):
+        return False
+    causal = re.search(r"\b(?:caus(?:e[ds]?|ing)|led to|resulted in|attributable to)\b", claim, re.I)
+    causal_reported = re.search(r"\b(?:caus(?:e[ds]?|ing)|led to|resulted in|attributable to)\b",
+                                scoped, re.I)
+    causal_design = (re.search(r"\brandomiz\w*\b", quoted, re.I)
+                     and _statistical_support(scoped) and _relevant_partial_support(claim, support))
+    if causal and not qualified and not (causal_reported or causal_design):
+        return False
+    negated_causal = r"\b(?:not|never)\s+(?:\w+\s+){0,2}caus(?:e[ds]?|ing)\b"
+    if causal and not qualified and bool(re.search(negated_causal, claim, re.I)) != bool(
+            re.search(negated_causal, scoped, re.I)):
+        return False
+    effectiveness = re.search(r"\b(?:effective(?:ness)?|efficacy)\b", claim, re.I)
+    interpreted = (re.search(r"\b(?:conclud\w*|interpret\w*|describ\w*|judg\w*)\b", scoped, re.I)
+                   and _relevant_partial_support(claim, support)
+                   and re.search(r"\b(?:helpful|beneficial|improv\w*|effective|efficacy)\b", scoped, re.I)
+                   and not re.search(r"\b(?:uncertain|unclear|inconclusive|mixed|may|might|possible|ineffective|unhelpful|no benefit|failed to)\b", scoped, re.I))
+    if effectiveness and not qualified and not (re.search(r"\b(?:effective(?:ness)?|efficacy)\b", scoped, re.I)
+                                            or interpreted):
+        return False
+    if effectiveness and not qualified and re.search(r"\b(?:uncertain|unclear|inconclusive|mixed|may|might|possible)\b", scoped, re.I):
+        return False
+    negated_effectiveness = r"\b(?:not|never)\s+(?:\w+\s+){0,2}effective\b|\bno evidence of efficacy\b"
+    if effectiveness and not qualified and bool(re.search(negated_effectiveness, claim, re.I)) != bool(
+            re.search(negated_effectiveness, scoped, re.I)):
+        return False
+    no_effect = re.search(r"\b(?:no|zero)\s+(?:measurable\s+)?(?:effect|impact)\b", claim, re.I)
+    if no_effect and not re.search(r"\b(?:no|zero)\s+(?:measurable\s+)?(?:effect|impact)\b", quoted, re.I):
+        return False
+    return True
+
+
+def _statistical_support(quoted: str) -> bool:
+    """Recognize explicit significance or a reported test that excludes its null value."""
+    if re.search(r"\b(?:not|non|no)\s+(?:statistically\s+)?significant\b", quoted, re.I):
+        return False
+    if re.search(r"\bstatistically significant\b|\bsignificant (?:effect|difference|association)\b",
+                 quoted, re.I):
+        return True
+    threshold = re.search(r"\b(?:alpha|significance threshold)\s*(?:=|of)\s*(0?\.\d+)\b", quoted, re.I)
+    alpha = float(threshold.group(1)) if threshold else 0.05
+    p_value = re.search(r"\bp\s*(<=|<|=)\s*(0?\.\d+)\b", quoted, re.I)
+    if p_value and (float(p_value.group(2)) < alpha
+                    or p_value.group(1) == "<" and float(p_value.group(2)) == alpha):
+        return True
+    interval = re.search(r"\b95\s*%?\s*(?:CI|confidence interval)\s*[:=(]?\s*"
+                         r"(-?\d+(?:\.\d+)?)\s*(?:to|[-–—,])\s*(-?\d+(?:\.\d+)?)", quoted, re.I)
+    if interval:
+        prefix = quoted[max(0, interval.start() - 80):interval.start()]
+        null = (1 if re.search(r"\b(?:risk|odds|hazard|rate) ratio\b|\b(?:RR|OR|HR)\b", prefix, re.I)
+                else 0 if re.search(r"\b(?:mean |risk |absolute )?difference\b", prefix, re.I) else None)
+        if null is not None:
+            low, high = float(interval.group(1)), float(interval.group(2))
+            return low <= high and (high < null or low > null)
+    return False
+
+
+def _proposition_terms(text: str) -> set[str]:
+    """Use subject and outcome words, excluding generic inference vocabulary."""
+    plain = _NUMERIC_CITATION.sub("", text)
+    for _, start, end in reversed(subject_spans(plain)):
+        plain = plain[:start] + " " + plain[end:]
+    ignored = {"about", "after", "among", "and", "authors", "because", "between", "change",
+               "could", "difference", "effect", "effective", "effectiveness", "efficacy",
+               "established", "evidence", "found", "from", "have", "impact", "intervention",
+               "into", "more", "not", "observed", "paper", "participants", "program", "proved",
+               "reported", "result", "research", "significant", "statistically", "study", "than",
+               "that", "their", "there", "these", "this", "those", "trial", "treatment", "were",
+               "what", "when", "which", "with", "lower", "higher", "reduced", "increased",
+               "improved", "caused", "causal", "interpreted", "concluded", "described", "the"}
+    return {re.sub(r"e$", "", re.sub(r"(?:ment|ing|ed|s)$", "", word))
+            for word in re.findall(r"[a-z]{4,}", plain.casefold()) if word not in ignored}
+
+
+def _relevant_passages(claim: str, support: list[ClaimQuote]) -> list[str]:
+    """Keep evidence clauses about the claimed outcome, not adjacent statistics."""
+    wanted = _proposition_terms(claim)
+    if not wanted:
+        subjects = subject_spans(_NUMERIC_CITATION.sub("", claim))
+        if not subjects:
+            return []
+        return [item.quote for item in support
+                if subjects[0][0].casefold() in item.quote.casefold()
+                and re.search(r"\b(?:difference|significant|measured|observed)\b|\d", item.quote, re.I)]
+    passages = []
+    for item in support:
+        clauses = re.split(r"[.;]\s+|,?\s+\b(?:whereas|while|but)\b\s+", item.quote, flags=re.I)
+        matched = [part for part in clauses if wanted & _proposition_terms(part)]
+        passages.extend(matched)
+    if not passages and wanted == {"outcom"}:
+        subjects = subject_spans(_NUMERIC_CITATION.sub("", claim))
+        passages = [item.quote for item in support if subjects
+                    and subjects[0][0].casefold() in item.quote.casefold()
+                    and re.search(r"\b(?:measured|observed|improved|reduced|increased)\b|\d", item.quote, re.I)]
+    return passages
+
+
+def _relevant_partial_support(claim: str, support: list[ClaimQuote]) -> bool:
+    """Do not display a valid quote about a different outcome as partial support."""
+    passages = _relevant_passages(claim, support)
+    if not passages:
+        return False
+    claim_direction = re.search(r"\b(?:reduc\w*|decreas\w*|lower|fall\w*|fell|dropp\w*|less|increas\w*|higher|ris\w*|rose|improv\w*|more)\b", claim, re.I)
+    if claim_direction:
+        decreasing = re.compile(r"\b(?:reduc\w*|decreas\w*|lower|fall\w*|fell|dropp\w*|less)\b", re.I)
+        increasing = re.compile(r"\b(?:increas\w*|higher|ris\w*|rose|improv\w*|more)\b", re.I)
+        wanted_down = bool(decreasing.search(claim_direction.group()))
+        if all((increasing if wanted_down else decreasing).search(part)
+               and not (decreasing if wanted_down else increasing).search(part) for part in passages):
+            return False
+    return True
+
+
 def review_claims(claims: list[Claim], proposed: list[ClaimAssessment],
                   evidence: list[Evidence], verified_dates: dict[str, date] | None = None,
                   today: date | None = None) -> list[ReviewedClaim]:
@@ -205,7 +379,7 @@ def review_claims(claims: list[Claim], proposed: list[ClaimAssessment],
                         "quote_match=unknown source_match=unknown numeric_match=unknown "
                         "contradiction_match=unknown reason=%s",
                         claim.id, claim.cited_ids, item.status if item else "missing", reason)
-            result.append(ReviewedClaim(claim, "unsupported", [], [], reason))
+            result.append(ReviewedClaim(claim, "unsupported", [], [], reason, reason))
             continue
         support = item.supporting
         oppose = item.opposing
@@ -215,9 +389,13 @@ def review_claims(claims: list[Claim], proposed: list[ClaimAssessment],
                                  quote.source_id.startswith("ext")) for quote in support))
         numeric_match = _numbers_supported(claim.text, support) if item.status in ("supported", "partially_supported") else True
         legal_scope_match = _legal_scope_supported(claim.text, support) if item.status == "supported" else True
+        inference_scope_match = _inference_scope_supported(claim.text, support) if item.status == "supported" else True
+        partial_relevance_match = (_relevant_partial_support(claim.text, support)
+                                   if item.status == "partially_supported" else True)
         contradiction_match = not oppose or _explicit_opposition(support, oppose)
         valid = (item.status in ("supported", "partially_supported", "unsupported", "contradicted")
-                 and quote_match and source_match and numeric_match and legal_scope_match and contradiction_match
+                 and quote_match and source_match and numeric_match and legal_scope_match
+                 and inference_scope_match and partial_relevance_match and contradiction_match
                  and all(quote.source_id not in {item.source_id for item in support} for quote in oppose)
                  and (item.status == "unsupported" or bool(support))
                  and (item.status != "contradicted" or bool(oppose))
@@ -229,17 +407,29 @@ def review_claims(claims: list[Claim], proposed: list[ClaimAssessment],
         reason_code = ("accepted" if valid else "quote_mismatch" if not quote_match else
                        "source_mismatch" if not source_match else "numeric_mismatch" if not numeric_match else
                        "legal_scope_mismatch" if not legal_scope_match else
+                       "inference_scope_mismatch" if not inference_scope_match else
+                       "irrelevant_supporting_quote" if not partial_relevance_match else
                        "contradiction_mismatch" if not contradiction_match else
                        "missing_supporting_quote" if item.status != "unsupported" and not support else
                        "invalid_status_or_support")
         logger.info("claim_verification claim_id=%s source_ids=%s quote_source_ids=%s proposed_status=%s quote_match=%s "
-                    "source_match=%s numeric_match=%s legal_scope_match=%s contradiction_match=%s reason=%s",
+                    "source_match=%s numeric_match=%s legal_scope_match=%s inference_scope_match=%s "
+                    "partial_relevance_match=%s "
+                    "contradiction_match=%s reason=%s",
                     claim.id, claim.cited_ids, [quote.source_id for quote in support + oppose], item.status,
-                    quote_match, source_match, numeric_match, legal_scope_match, contradiction_match, reason_code)
+                    quote_match, source_match, numeric_match, legal_scope_match, inference_scope_match,
+                    partial_relevance_match,
+                    contradiction_match, reason_code)
         if not valid:
             reason = ("No citation was attached to the claim." if not claim.cited_ids else
                       "The proposed supporting quote was absent from the cited passage or did not cover the claim.")
-            result.append(ReviewedClaim(claim, "unsupported", [], [], reason))
+            if (reason_code == "inference_scope_mismatch" and contradiction_match and not oppose
+                    and _relevant_partial_support(claim.text, support)):
+                result.append(ReviewedClaim(claim, "partially_supported", support, [],
+                                            "The cited passage supports an observation but not the stronger conclusion.",
+                                            reason_code))
+            else:
+                result.append(ReviewedClaim(claim, "unsupported", [], [], reason, reason_code))
             continue
         status: ClaimStatus = "contradicted" if oppose and support else item.status
         if (status == "supported" and claim.section == "external"
@@ -249,7 +439,14 @@ def review_claims(claims: list[Claim], proposed: list[ClaimAssessment],
             if any((stamp := dates.get(quote.source_id)) is None or stamp.year < cutoff
                    for quote in support):
                 status = "partially_supported"
-        result.append(ReviewedClaim(claim, status, support, oppose, item.explanation))
+                reason_code = "outdated_or_unverified_external_source"
+        if status == "partially_supported" and reason_code == "accepted":
+            reason_code = "provider_partial"
+        elif status == "unsupported" and reason_code == "accepted":
+            reason_code = "provider_unsupported"
+        elif status == "contradicted" and reason_code == "accepted":
+            reason_code = "verified_contradiction"
+        result.append(ReviewedClaim(claim, status, support, oppose, item.explanation, reason_code))
     return result
 
 
