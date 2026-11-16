@@ -1,9 +1,59 @@
 import unittest
 
-from app.services.evidence_coverage import CoveragePassage, coverage_report, missing_coverage
+from app.services.evidence_coverage import CoveragePassage, coverage_report, missing_coverage, requested_coverage
 
 
 class EvidenceCoverageTests(unittest.TestCase):
+    def test_context_words_do_not_create_independent_answer_parts(self):
+        cases = [
+            ("What findings were reported among students?", ["findings"]),
+            ("What findings were reported after six months?", ["findings"]),
+            ("What did participants report about recovery?", ["findings"]),
+            ("What design was used with 40 participants?", ["design"]),
+        ]
+        for question, dimensions in cases:
+            with self.subTest(question=question):
+                self.assertEqual(requested_coverage(question)[1], dimensions)
+
+    def test_explicit_participant_and_duration_requests_remain_targets(self):
+        self.assertEqual(requested_coverage(
+            "Compare each study's design, participants, and duration.")[1],
+            ["design", "participants", "duration"])
+
+    def test_implicit_comparison_uses_two_studies_found_in_evidence(self):
+        question = ("Compare both studies' designs, participant counts, findings and duration.")
+        passages = [CoveragePassage("c1", "Trial Solstice used a cohort design with 48 patients. "
+                                    "Misconduct decreased by 4%. Follow-up lasted six months."),
+                    CoveragePassage("c2", "Trial Polaris used a randomized design. "
+                                    "Participants were discussed. The finding was measured.")]
+        self.assertEqual(requested_coverage(question)[0], [])
+        report = {(item.subject, item.dimension): item.status
+                  for item in coverage_report(question, passages)}
+        self.assertEqual(report["Trial Solstice", "design"], "information_present")
+        self.assertEqual(report["Trial Solstice", "participants"], "information_present")
+        self.assertEqual(report["Trial Solstice", "findings"], "information_present")
+        self.assertEqual(report["Trial Solstice", "duration"], "information_present")
+        self.assertEqual(report["Trial Polaris", "design"], "information_present")
+        self.assertEqual(report["Trial Polaris", "participants"], "topic_mentioned")
+        self.assertEqual(report["Trial Polaris", "findings"], "topic_mentioned")
+        self.assertEqual(report["Trial Polaris", "duration"], "missing")
+        self.assertEqual(missing_coverage(question, [item.text for item in passages]),
+                         [("Trial Polaris", "participants"), ("Trial Polaris", "duration"),
+                          ("Trial Polaris", "findings")])
+        two_studies = coverage_report("Compare the two studies' designs.", passages)
+        self.assertEqual([item.subject for item in two_studies],
+                         ["Trial Solstice", "Trial Polaris"])
+
+    def test_each_study_can_identify_more_than_two_subjects(self):
+        question = "Compare each study's participant count."
+        passages = [CoveragePassage("c1", "Study Aurora participants: 24 teachers."),
+                    CoveragePassage("c2", "Study Boreal discussed participants."),
+                    CoveragePassage("c3", "Study Cypress participants: 36 teachers.")]
+        report = [(item.subject, item.status) for item in coverage_report(question, passages)]
+        self.assertEqual(report, [("Study Aurora", "information_present"),
+                                  ("Study Boreal", "topic_mentioned"),
+                                  ("Study Cypress", "information_present")])
+
     def test_named_trials_and_cohorts_are_scoped_independently(self):
         question = "Compare Trial ORBIT and the Northstar cohort designs and sample sizes."
         report = coverage_report(question, [CoveragePassage("c1",

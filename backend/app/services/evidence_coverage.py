@@ -24,23 +24,52 @@ DIMENSIONS = {
 }
 
 
-def requested_coverage(question: str) -> tuple[list[str], list[str]]:
+def requested_coverage(question: str, passages: list[str] | None = None) -> tuple[list[str], list[str]]:
     """Extract explicitly named subjects and answer dimensions from a question."""
     subjects = requested_subjects(question)
-    dimensions = [name for name, (prompt, _) in DIMENSIONS.items() if re.search(prompt, question, re.I)]
+    # A follow-up may inherit the prior subject, but its requested parts come
+    # from the user's current question rather than the previous question.
+    intent = question.rsplit("Follow-up question:", 1)[-1]
+    if not subjects and passages and re.search(
+        r"\b(?:both\s+(?:of\s+the\s+)?studies|the\s+two\s+studies|each\s+study|"
+        r"compar\w*\s+(?:the\s+)?studies)\b", question, re.I):
+        found = list(dict.fromkeys(name for text in passages for name, _, _ in subject_spans(text)))
+        if len(found) == 2 or (re.search(r"\beach\s+study\b", question, re.I) and len(found) > 2):
+            subjects = found
+    dimensions = [name for name, (prompt, _) in DIMENSIONS.items() if re.search(prompt, intent, re.I)]
+    if "design" in dimensions and not re.search(r"\b(?:methodolog\w*|designs?)\b", intent, re.I):
+        dimensions.remove("design")
+    if "participants" in dimensions:
+        explicit_count = re.search(r"\b(?:how many|number of|count of|sample sizes?|participant counts?|"
+                                   r"demograph\w*|who (?:was|were) (?:enrolled|included|recruited))\b", intent, re.I)
+        contextual = re.search(r"\b(?:among|with|for|involving)\s+(?:\d[\d,]*\s+)?"
+                               r"(?:participants?|students?|subjects?|patients?)\b", intent, re.I)
+        acting = re.search(r"\b(?:participants?|students?|subjects?|patients?)\s+"
+                           r"(?:report\w*|said|found|experienced|observed|described)\b", intent, re.I)
+        if (not explicit_count and (contextual or acting
+                or not re.search(r"\bparticipants?\b", intent, re.I))):
+            dimensions.remove("participants")
+    if "duration" in dimensions and not re.search(
+            r"\b(?:duration|periods?|how long|length of|time span|follow.up length|"
+            r"how many (?:years?|months?|weeks?|semesters?))\b", intent, re.I):
+        dimensions.remove("duration")
+    if not dimensions and re.search(r"\b(?:report\w*|findings?|results?|outcomes?|"
+                                    r"effects?|impact|affect\w*|compar\w*|differ\w*)\b", intent, re.I):
+        dimensions = ["findings"]
     if ("design" in dimensions and "setting" not in dimensions
-            and re.search(r"\b(?:universit\w*|institutions?|colleges?)\b", question, re.I)
-            and not re.search(r"\b(?:should|adopt|generaliz\w*|all universities)\b", question, re.I)):
+            and re.search(r"\b(?:universit\w*|institutions?|colleges?)\b", intent, re.I)
+            and not re.search(r"\b(?:should|adopt|generaliz\w*|all universities)\b", intent, re.I)):
         dimensions.append("setting")
-    if not dimensions and re.search(r"\b(?:compare|comparison|differences?|similarities?)\b", question, re.I):
+    if not dimensions and re.search(r"\b(?:compare|comparison|differences?|similarities?)\b", intent, re.I):
         dimensions = ["findings"]
     return subjects, dimensions
 
 
-def missing_coverage(question: str, passages: list[str]) -> list[tuple[str, str]]:
+def missing_coverage(question: str, passages: list[str],
+                     subjects: list[str] | None = None) -> list[tuple[str, str]]:
     """Find requested information absent from candidate text, without approving claims."""
     report = coverage_report(question, [CoveragePassage(str(index), text)
-                                        for index, text in enumerate(passages)])
+                                        for index, text in enumerate(passages)], subjects=subjects)
     return [(item.subject, item.dimension) for item in report
             if item.status not in ("information_present", "verified_claim_support")]
 
@@ -72,10 +101,14 @@ _PERIOD = r"(?:semesters?|years?|months?|weeks?|days?|exam periods?|terms?)"
 def _information_present(question: str, dimension: str, text: str) -> bool:
     """Require a factual cue for the requested dimension; semantic verification follows later."""
     if dimension == "participants":
+        count = bool(re.search(rf"\b{_COUNT}\s+(?:\w+\s+){{0,2}}{_PEOPLE}\b"
+                               rf"|\b{_PEOPLE}\s*(?:[:=]|of|numbered|totaled|included)\s*{_COUNT}\b", text, re.I))
         if re.search(r"\b(?:how many|number of|sample sizes?|count of|total)\b", question, re.I):
-            return bool(re.search(rf"\b{_COUNT}\s+(?:\w+\s+){{0,2}}{_PEOPLE}\b"
-                                  rf"|\b{_PEOPLE}\s*(?:[:=]|of|numbered|totaled|included)\s*{_COUNT}\b", text, re.I))
-        return bool(re.search(rf"\b{_PEOPLE}\b", text, re.I))
+            return count
+        return count or bool(re.search(
+            rf"\b{_PEOPLE}\s+(?:were|included|comprised|consisted of)\s+"
+            r"(?:undergraduate|graduate|adult|child|adolescent|male|female|volunteer|"
+            r"clinician|teacher|student|patient|respondent)\w*\b", text, re.I))
     if dimension == "setting":
         return bool(re.search(rf"\b{_COUNT}\s+(?:\w+\s+){{0,2}}{_PLACES}\b", text, re.I))
     if dimension == "duration":
@@ -100,9 +133,11 @@ def _information_present(question: str, dimension: str, text: str) -> bool:
 
 
 def coverage_report(question: str, passages: list[CoveragePassage],
-                    verified_ids: set[str] | None = None) -> list[CoverageFinding]:
+                    verified_ids: set[str] | None = None,
+                    subjects: list[str] | None = None) -> list[CoverageFinding]:
     """Report verified support only for IDs supplied by the claim verifier."""
-    subjects, dimensions = requested_coverage(question)
+    inferred_subjects, dimensions = requested_coverage(question, [item.text for item in passages])
+    subjects = subjects if subjects is not None else inferred_subjects
     targets = subjects or [""]
     inferred: dict[str, str] = {}
     previous = None

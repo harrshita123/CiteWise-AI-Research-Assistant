@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from typing import Literal
 from collections import Counter, OrderedDict
 from hashlib import sha256
@@ -8,6 +8,7 @@ import unicodedata
 import hmac
 from threading import Lock
 import re
+import time
 from datetime import date, datetime, timezone
 from uuid import uuid4
 from urllib.parse import urlparse
@@ -21,7 +22,7 @@ from ..models import UserResponse
 from ..paper_models import ChunkResponse
 from ..providers.answers import (AnswerProvider, AnswerRateLimitError, Evidence, EvidenceAssessment, EvidenceQuote,
                                  EvidenceStatus, ExternalEvidence)
-from ..providers.groq_answers import GroqAnswerProvider, groq_trace
+from ..providers.groq_answers import GroqAnswerProvider, groq_request_id, groq_trace
 from ..providers.external_search import TavilyExternalSearch
 from ..repositories.papers import PaperRepository
 from ..repositories.conversations import ConversationRepository
@@ -32,6 +33,43 @@ from ..services.research_subjects import requested_subjects, subject_spans
 from ..services.claim_verification import split_claims, review_claims, present_claims
 
 router = APIRouter(prefix="/api/v1/research", tags=["research"])
+_GROQ_COOLDOWN_COOKIE = "citewise_groq_cooldown"
+
+
+def _cooldown_signature(key: str, deadline: int) -> str:
+    secret = get_settings().jwt_secret.encode()
+    return hmac.new(secret, f"{key}\0{deadline}".encode(), sha256).hexdigest()
+
+
+def _cooldown_seconds(request: Request, provider: GroqAnswerProvider) -> int:
+    token = request.cookies.get(_GROQ_COOLDOWN_COOKIE, "")
+    deadline_text, separator, signature = token.partition(".")
+    if (not separator or not deadline_text.isdecimal() or len(deadline_text) > 12
+            or not re.fullmatch(r"[0-9a-f]{64}", signature)):
+        return 0
+    deadline = int(deadline_text)
+    if not hmac.compare_digest(signature, _cooldown_signature(provider.api_key, deadline)):
+        return 0
+    return max(0, deadline - int(time.time()))
+
+
+def _rate_limit_headers(exc: AnswerRateLimitError, provider: AnswerProvider) -> dict[str, str] | None:
+    if not exc.retry_after:
+        return None
+    headers = {"Retry-After": exc.retry_after}
+    if isinstance(provider, GroqAnswerProvider) and provider.api_key:
+        try:
+            seconds = int(exc.retry_after)
+        except (TypeError, ValueError):
+            return headers
+        if seconds <= 0:
+            return headers
+        deadline = int(time.time()) + seconds
+        token = f"{deadline}.{_cooldown_signature(provider.api_key, deadline)}"
+        secure = "; Secure" if get_settings().session_cookie_secure else ""
+        headers["Set-Cookie"] = (f"{_GROQ_COOLDOWN_COOKIE}={token}; Max-Age={seconds}; "
+                                 f"Path=/api/v1/research; HttpOnly; SameSite=Lax{secure}")
+    return headers
 _assessment_cache: OrderedDict[tuple[GroqAnswerProvider, str], "EvidenceReview"] = OrderedDict()
 _assessment_cache_lock = Lock()
 _assessment_cache_limit = 128
@@ -171,15 +209,31 @@ class SavedMessage(BaseModel):
 class ConversationResponse(BaseModel):
     id: str
     paper_id: str
+    paper_filename: str | None = None
+    title: str
+    pinned: bool = False
+    saved: bool = False
     created_at: datetime
     updated_at: datetime
     messages: list[SavedMessage]
 
 
-def _conversation_response(document: dict) -> ConversationResponse:
+def _conversation_response(document: dict, paper_filename: str | None = None) -> ConversationResponse:
     return ConversationResponse(id=document["_id"], paper_id=document["paper_id"],
+                                paper_filename=document.get("paper_filename") or paper_filename or next(
+                                    (source.get("document_name") for message in document.get("messages", [])
+                                     for source in message.get("sources", []) if source.get("document_name")), None),
+                                title=document.get("title") or (document.get("messages") or [{}])[-1].get("question", "Conversation"),
+                                pinned=document.get("pinned", False),
+                                saved=document.get("saved") is True,
                                 created_at=document["created_at"], updated_at=document["updated_at"],
                                 messages=document.get("messages", []))
+
+
+class ConversationUpdate(BaseModel):
+    title: str | None = None
+    pinned: bool | None = None
+    saved: bool | None = None
 
 
 async def _verified_sections(provider: AnswerProvider, question: str, pdf_text: str,
@@ -269,9 +323,10 @@ def _local_claim_debug(request: Request) -> bool:
         return False
 
 
-def _methodology_comparison_gaps(question: str, claims: list[ClaimReviewResponse]) -> list[str]:
+def _methodology_comparison_gaps(question: str, claims: list[ClaimReviewResponse],
+                                 passages: list[str] | None = None) -> list[str]:
     """Report only requested parts missing from independently verified PDF claims."""
-    subjects, dimensions = requested_coverage(question)
+    subjects, dimensions = requested_coverage(question, passages)
     if not dimensions or (len(subjects) < 2 and len(dimensions) < 2):
         return []
     supported = [item.text for item in claims if item.section == "pdf" and item.status == "supported"]
@@ -284,7 +339,7 @@ def _methodology_comparison_gaps(question: str, claims: list[ClaimReviewResponse
                      if re.search(rf"\b{re.escape(subject)}\b", quote.quote, re.I)]
             prefix = labels[0] if not named and len(labels) == 1 else ""
             supported.append(f"{prefix} {quote.quote}")
-    missing = missing_coverage(question, supported)
+    missing = missing_coverage(question, supported, subjects=subjects)
     gaps = []
     for subject in subjects or [""]:
         absent = [dimension for label, dimension in missing if label == subject]
@@ -301,10 +356,61 @@ def _methodology_comparison_gaps(question: str, claims: list[ClaimReviewResponse
     return gaps
 
 
+def _verified_answer_parts(question: str, claims: list[ClaimReviewResponse],
+                           sources: dict[str, AnswerSource]) -> list[tuple[str, str, str, list[str]]]:
+    """Describe requested parts using claim-verified PDF evidence only."""
+    subjects, dimensions = requested_coverage(question, [source.text for source in sources.values()])
+    if not dimensions:
+        return []
+    supported = []
+    partial = []
+    claim_sources = {}
+    for index, claim in enumerate(claims):
+        if claim.section != "pdf":
+            continue
+        ids = [quote.source_id for quote in claim.supporting if quote.source_id in sources]
+        if not ids:
+            continue
+        if claim.status == "supported":
+            key = f"claim-{index}"
+            supported.append(CoveragePassage(key, claim.text))
+            claim_sources[key] = ids
+        elif claim.status == "partially_supported":
+            names = [name for name in subjects if re.search(rf"\b{re.escape(name)}\b", claim.text, re.I)]
+            prefix = names[0] if len(names) == 1 else ""
+            for quote_index, quote in enumerate(claim.supporting):
+                if quote.source_id in sources:
+                    key = f"partial-{index}-{quote_index}"
+                    partial.append(CoveragePassage(key, f"{prefix} {quote.quote}"))
+                    claim_sources[key] = [quote.source_id]
+    full = coverage_report(question, supported, {item.id for item in supported}, subjects=subjects)
+    incomplete = coverage_report(question, partial, subjects=subjects)
+    result = []
+    for full_part, partial_part in zip(full, incomplete):
+        if full_part.status == "verified_claim_support":
+            status, ids = "supported", full_part.information_ids
+        elif partial_part.status == "information_present":
+            status, ids = "partially_supported", partial_part.information_ids
+        else:
+            status, ids = "unsupported", ()
+        result.append((full_part.subject, full_part.dimension, status,
+                       list(dict.fromkeys(source_id for item in ids
+                                              for source_id in claim_sources[item]))))
+    return result
+
+
 @router.get("/conversations", response_model=list[ConversationResponse])
 async def list_conversations(request: Request, user: UserResponse = Depends(get_current_user)):
     repository: ConversationRepository = request.app.state.conversation_repository
-    return [_conversation_response(item) for item in await repository.list_for_user(user.id)]
+    documents = await repository.list_for_user(user.id)
+    paper_repository: PaperRepository = request.app.state.paper_repository
+    filenames = {}
+    for item in documents:
+        paper_id = item["paper_id"]
+        if paper_id not in filenames and not item.get("paper_filename"):
+            paper = await paper_repository.find(user.id, paper_id)
+            filenames[paper_id] = paper.get("filename") if paper else None
+    return [_conversation_response(item, filenames.get(item["paper_id"])) for item in documents]
 
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationResponse)
@@ -314,7 +420,35 @@ async def get_conversation(conversation_id: str, request: Request,
     document = await repository.find(user.id, conversation_id)
     if document is None:
         raise HTTPException(404, "Conversation not found.")
-    return _conversation_response(document)
+    paper = await request.app.state.paper_repository.find(user.id, document["paper_id"])
+    return _conversation_response(document, paper.get("filename") if paper else None)
+
+
+@router.patch("/conversations/{conversation_id}", response_model=ConversationResponse)
+async def update_conversation(conversation_id: str, payload: ConversationUpdate, request: Request,
+                              user: UserResponse = Depends(get_current_user)):
+    fields = {}
+    if "title" in payload.model_fields_set:
+        title = payload.title.strip() if payload.title is not None else ""
+        if not title or len(title) > 120:
+            raise HTTPException(422, "Conversation title must contain 1 to 120 characters.")
+        fields["title"] = title
+    if "pinned" in payload.model_fields_set:
+        if payload.pinned is None:
+            raise HTTPException(422, "Pinned must be true or false.")
+        fields["pinned"] = payload.pinned
+    if "saved" in payload.model_fields_set:
+        if payload.saved is None:
+            raise HTTPException(422, "Saved must be true or false.")
+        fields["saved"] = payload.saved
+    if not fields:
+        raise HTTPException(422, "Provide a title, pinned status, or saved status.")
+    repository: ConversationRepository = request.app.state.conversation_repository
+    if not await repository.update_metadata(user.id, conversation_id, fields):
+        raise HTTPException(404, "Conversation not found.")
+    document = await repository.find(user.id, conversation_id)
+    paper = await request.app.state.paper_repository.find(user.id, document["paper_id"])
+    return _conversation_response(document, paper.get("filename") if paper else None)
 
 
 @router.delete("/conversations/{conversation_id}", status_code=204)
@@ -345,28 +479,57 @@ def _evidence_excerpt(question: str, text: str) -> str:
 
 
 def _evidence_context(question: str, text: str) -> str:
-    """Give the model nearby sentences so a qualification is not lost."""
-    subjects, dimensions = requested_coverage(question)
-    if (len(subjects) > 1 or len(dimensions) > 1
-            or re.search(r"\b(?:both|compar\w*|combined|together|explain|evaluate|synthesiz\w*|"
-                         r"recommend\w*|relationship|why)\b", question, re.I)):
-        if len(text) <= 2400:
-            return text.strip()
-        sentences = re.split(r"(?<=[.!?])\s+", text)
-        terms = VectorRepository._terms(question)
-        ranked = sorted(range(len(sentences)),
-                        key=lambda index: (-len(terms & VectorRepository._terms(sentences[index])), index))
-        selected = set()
-        for index in ranked:
-            proposed = selected | {index} | ({index - 1} if index else set()) | (
-                {index + 1} if index + 1 < len(sentences) else set())
-            if len(" ".join(sentences[item] for item in sorted(proposed))) <= 2400:
-                selected = proposed
-        return " ".join(sentences[item] for item in sorted(selected)).strip() or text[:2400].strip()
+    """Retain requested facts and nearby qualifications within a fixed chunk budget."""
+    if len(text) <= 2400:
+        return text.strip()
     sentences = re.split(r"(?<=[.!?])\s+", text)
+    # PDF extraction can produce a single sentence longer than the prompt budget.
+    bounded = []
+    for sentence in sentences:
+        while len(sentence) > 1200:
+            boundary = sentence.rfind(" ", 600, 1201)
+            boundary = boundary if boundary > 0 else 1200
+            bounded.append(sentence[:boundary].strip())
+            sentence = sentence[boundary:].strip()
+        if sentence:
+            bounded.append(sentence)
+    sentences = bounded
     terms = VectorRepository._terms(question)
-    best_index = max(range(len(sentences)), key=lambda index: len(terms & VectorRepository._terms(sentences[index])))
-    return " ".join(sentences[max(0, best_index - 1):best_index + 2])[:1200].strip()
+    ranked = sorted(range(len(sentences)),
+                    key=lambda index: (-len(terms & VectorRepository._terms(sentences[index])), index))
+    selected: set[int] = set()
+    # Prefer sentences that fill a requested coverage gap, even if they share
+    # fewer question terms than a nearby background sentence.
+    for index in ranked:
+        current = " ".join(sentences[item] for item in sorted(selected))
+        proposed = " ".join(sentences[item] for item in sorted(selected | {index}))
+        if (len(" ".join(sentences[item] for item in sorted(selected | {index}))) <= 2400
+                and len(missing_coverage(question, [proposed]))
+                < len(missing_coverage(question, [current]))):
+            selected.add(index)
+    for index in ranked:
+        proposed = selected | {index} | ({index - 1} if index else set()) | (
+            {index + 1} if index + 1 < len(sentences) else set())
+        if len(" ".join(sentences[item] for item in sorted(proposed))) <= 2400:
+            selected = proposed
+    return " ".join(sentences[item] for item in sorted(selected)).strip() or text[:2400].strip()
+
+
+def _log_evidence_handoff(request_id: str | None, stage: str,
+                          ids: list[str], sources: dict[str, AnswerSource],
+                          excerpts: dict[str, str] | None = None) -> None:
+    """Record provenance across stages without recording question or passage text."""
+    safe_id = request_id if isinstance(request_id, str) and re.fullmatch(
+        r"[A-Za-z0-9_-]{1,64}", request_id) else "none"
+    records = [{"source_id": item, "page_number": sources[item].page_number,
+                "chunk_index": sources[item].chunk_index,
+                "full_chars": len(sources[item].text),
+                "excerpt_chars": len(excerpts[item]) if excerpts and item in excerpts else None,
+                "excerpt_hash": sha256(excerpts[item].encode("utf-8")).hexdigest()[:12]
+                if excerpts and item in excerpts else None}
+               for item in dict.fromkeys(ids) if item in sources]
+    logging.getLogger("uvicorn.error").info(
+        "research_evidence_handoff request_id=%s stage=%s chunks=%s", safe_id, stage, records)
 
 
 def _quote_tokens(value: str) -> str:
@@ -374,22 +537,56 @@ def _quote_tokens(value: str) -> str:
     return " ".join(re.findall(r"\d[\d,]*(?:\.\d+)?|[^\W\d_]+|%", value))
 
 
+def _coverage_gap_message(question: str, gaps: list[tuple[str, str]],
+                          sources: dict[str, AnswerSource], ids: list[str],
+                          subjects: list[str] | None = None) -> str:
+    selected = [CoveragePassage(item, sources[item].text,
+                sources[item].page_number, sources[item].chunk_index) for item in ids]
+    present = {(item.subject, item.dimension) for item in coverage_report(question, selected, subjects=subjects)
+               if item.status == "information_present"}
+    quote_only = [gap for gap in gaps if gap in present]
+    absent = [gap for gap in gaps if gap not in present]
+
+    def label(items: list[tuple[str, str]]) -> str:
+        return ", ".join(f"{subject + ' ' if subject else ''}{dimension}"
+                          for subject, dimension in items) + "."
+
+    missing = ("The selected PDF chunks contain information omitted from the cited quotes for "
+               + label(quote_only) if quote_only else "")
+    if absent:
+        missing += (" " if missing else "") + "The selected PDF chunks do not establish " + label(absent)
+    return missing
+
+
 def _validate_assessment(assessment: EvidenceAssessment, question: str,
                          sources: dict[str, AnswerSource],
                          request_id: str | None = None) -> EvidenceReview | None:
     """Reject unsupported labels before they can authorize external search."""
+    invalid_quote_details: list[tuple[int, str, str]] = []
+    valid_quotes: list[EvidenceQuote] = []
+    subjects, dimensions = requested_coverage(question, [source.text for source in sources.values()])
+    subject_aliases = {subject: f"subject_{index + 1}" for index, subject in enumerate(subjects)}
+    coverage_statuses: list[tuple[str, str, str]] = []
     def reject(reason: str) -> None:
         cited_ids = assessment.chunk_ids
         quotes = assessment.supporting_quotes
         safe_request_id = request_id if isinstance(request_id, str) and re.fullmatch(
             r"[A-Za-z0-9_-]{1,64}", request_id) else "none"
         level = assessment.level if assessment.level in ("sufficient", "partial", "none") else "invalid"
-        logging.getLogger(__name__).info(
+        logging.getLogger("uvicorn.error").info(
             "evidence_assessment_rejected request_id=%s reason=%s level=%s "
-            "retrieved_sources=%d cited_source_ids=%d supporting_quotes=%d",
+            "retrieved_sources=%d cited_source_ids=%d supporting_quotes=%d invalid_quotes=%s "
+            "requested_subjects=%s requested_dimensions=%s coverage_statuses=%s "
+            "covered_targets=%s missing_targets=%s valid_quote_count=%d invalid_quote_count=%d",
             safe_request_id, reason, level, len(sources),
             len(cited_ids) if isinstance(cited_ids, list) else 0,
-            len(quotes) if isinstance(quotes, list) else 0)
+            len(quotes) if isinstance(quotes, list) else 0, invalid_quote_details,
+            list(subject_aliases.values()) or ["document"], dimensions, coverage_statuses,
+            [(subject, dimension) for subject, dimension, status in coverage_statuses
+             if status == "information_present"],
+            [(subject, dimension) for subject, dimension, status in coverage_statuses
+             if status != "information_present"],
+            len(valid_quotes), len(invalid_quote_details))
         return None
 
     if assessment.level not in ("sufficient", "partial", "none"):
@@ -401,7 +598,6 @@ def _validate_assessment(assessment: EvidenceAssessment, question: str,
         return reject("missing_supporting_quote")
     invalid_quote_ids: set[str] = set()
     valid_quote_ids: set[str] = set()
-    valid_quotes: list[EvidenceQuote] = []
     if assessment.supporting_quotes is not None:
         quotes = assessment.supporting_quotes
         if not isinstance(quotes, list) or any(
@@ -415,7 +611,7 @@ def _validate_assessment(assessment: EvidenceAssessment, question: str,
             return reject("missing_or_mismatched_supporting_quote")
         if len({(quote.chunk_id, _quote_tokens(quote.quote)) for quote in quotes}) != len(quotes):
             return reject("duplicate_supporting_quote")
-        for quote in quotes:
+        for quote_index, quote in enumerate(quotes):
             normalized_chunk = f" {_quote_tokens(sources[quote.chunk_id].text)} "
             fragments = [_quote_tokens(part) for part in re.split(r"\s*(?:\.\.\.|…)+\s*", quote.quote)
                          if part.strip()]
@@ -423,11 +619,13 @@ def _validate_assessment(assessment: EvidenceAssessment, question: str,
                 return reject("quote_not_found_in_source")
             cursor = 0
             ordered = True
+            missing_fragment = False
             for fragment in fragments:
                 normalized_fragment = f" {fragment} "
                 position = normalized_chunk.find(normalized_fragment, cursor)
                 if position < 0:
                     ordered = False
+                    missing_fragment = normalized_fragment not in normalized_chunk
                     break
                 cursor = position + len(normalized_fragment) - 1
             if ordered:
@@ -435,9 +633,10 @@ def _validate_assessment(assessment: EvidenceAssessment, question: str,
                 valid_quotes.append(quote)
                 continue
             invalid_quote_ids.add(quote.chunk_id)
+            invalid_quote_details.append((quote_index, quote.chunk_id,
+                                          "fragment_missing" if missing_fragment else "order_mismatch"))
     if invalid_quote_ids:
         valid_ids = [item for item in ids if item in valid_quote_ids]
-        subjects, dimensions = requested_coverage(question)
         quoted = []
         for quote in valid_quotes:
             if quote.chunk_id not in valid_ids:
@@ -445,13 +644,18 @@ def _validate_assessment(assessment: EvidenceAssessment, question: str,
             named = {name for name, _, _ in subject_spans(sources[quote.chunk_id].text)}
             prefix = next(iter(named)) if len(named) == 1 and next(iter(named)) in subjects else ""
             quoted.append(CoveragePassage(quote.chunk_id, f"{prefix} {quote.quote}"))
+        remaining_report = coverage_report(question, quoted, subjects=subjects)
+        coverage_statuses.extend((subject_aliases.get(item.subject, "document"), item.dimension, item.status)
+                                 for item in remaining_report)
         complete = bool(dimensions and valid_ids and
-                        all(item.status == "information_present" for item in coverage_report(question, quoted)))
-        if not complete:
+                        all(status == "information_present" for _, _, status in coverage_statuses))
+        if not complete and not any(status == "information_present" for _, _, status in coverage_statuses):
             return reject("quote_not_found_or_order_mismatch")
         ids = valid_ids
         logging.getLogger(__name__).info(
             "evidence_assessment_dropped_invalid_redundant_quotes source_ids=%s", sorted(invalid_quote_ids))
+    _log_evidence_handoff(request_id, "assessment_quoted",
+                          [quote.chunk_id for quote in valid_quotes], sources)
     if assessment.level == "none":
         if ids:
             return reject("none_with_source_ids")
@@ -479,8 +683,11 @@ def _validate_assessment(assessment: EvidenceAssessment, question: str,
             return reject("missing_partial_information")
     level = assessment.level
     missing = assessment.missing_information.strip()
+    if level == "partial":
+        _, gap_dimensions = requested_coverage(missing)
+        if dimensions and gap_dimensions and not set(gap_dimensions).issubset(dimensions):
+            missing = "Some requested information could not be verified from the cited passages."
     if level == "sufficient":
-        subjects, _ = requested_coverage(question)
         quoted_passages = []
         for quote in valid_quotes:
             if quote.chunk_id not in ids:
@@ -489,13 +696,92 @@ def _validate_assessment(assessment: EvidenceAssessment, question: str,
             labels = [subject for subject in subjects if re.search(rf"\b{re.escape(subject)}\b", passage, re.I)]
             label = labels[0] if len(labels) == 1 else ""
             quoted_passages.append(f"{label} {quote.quote}")
-        gaps = missing_coverage(question, quoted_passages)
+        gaps = missing_coverage(question, quoted_passages, subjects=subjects)
         if gaps:
             level = "partial"
-            missing = "The cited PDF quotes do not establish " + ", ".join(
-                f"{subject + ' ' if subject else ''}{dimension}" for subject, dimension in gaps) + "."
+            missing = _coverage_gap_message(question, gaps, sources, ids, subjects=subjects)
+    quoted_passages = []
+    for quote in valid_quotes:
+        if quote.chunk_id not in ids:
+            continue
+        names = {name for name, _, _ in subject_spans(sources[quote.chunk_id].text)}
+        prefix = next(iter(names)) if len(names) == 1 and next(iter(names)) in subjects else ""
+        quoted_passages.append(CoveragePassage(quote.chunk_id, f"{prefix} {quote.quote}"))
+    report = coverage_report(question, quoted_passages, subjects=subjects)
+    logging.getLogger("uvicorn.error").info(
+        "research_assessment_parts request_id=%s level=%s parts=%s",
+        request_id if isinstance(request_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_id)
+        else "none", level,
+        [(subject_aliases.get(item.subject, "document"), item.dimension, item.status)
+         for item in report])
     return EvidenceReview(level=level, chunk_ids=list(dict.fromkeys(ids)),
                           missing_information=missing[:500])
+
+
+def _reconcile_assessment_gap(assessment: EvidenceReview | None,
+                              claims: list[ClaimReviewResponse], question: str = "",
+                              sources: dict[str, AnswerSource] | None = None) -> EvidenceReview | None:
+    """Clear a coverage gap only when verified PDF claims establish its dimensions."""
+    if not assessment or not assessment.missing_information:
+        return assessment
+    _, dimensions = requested_coverage(assessment.missing_information)
+    if not dimensions:
+        return assessment
+    verified = [item.text for item in claims if item.section == "pdf"
+                and item.status == "supported" and item.supporting]
+    generated_gap = assessment.missing_information.startswith((
+        "The selected PDF chunks contain information omitted from the cited quotes",
+        "The selected PDF chunks do not establish"))
+    if generated_gap and question and sources and verified:
+        subjects, requested_dimensions = requested_coverage(
+            question, [source.text for source in sources.values()])
+        gap_subjects, gap_dimensions = requested_coverage(assessment.missing_information)
+        targets = {(subject, dimension) for subject in (subjects or [""])
+                   for dimension in set(gap_dimensions).intersection(requested_dimensions)
+                   if not gap_subjects or re.search(
+                       rf"\b{re.escape(subject)}\s+{re.escape(dimension)}\b",
+                       assessment.missing_information, re.I)}
+        if not targets:
+            return assessment
+        remaining = [target for target in missing_coverage(question, verified, subjects=subjects)
+                     if target in targets]
+        if not remaining:
+            return assessment.model_copy(update={"level": "sufficient", "missing_information": ""})
+        return assessment.model_copy(update={"missing_information":
+            _coverage_gap_message(question, remaining, sources, assessment.chunk_ids,
+                                  subjects=subjects)[:500]})
+    if question and sources and verified:
+        subjects, requested_dimensions = requested_coverage(
+            question, [source.text for source in sources.values()])
+        gap_subjects, gap_dimensions = requested_coverage(assessment.missing_information)
+        relevant_dimensions = set(gap_dimensions).intersection(requested_dimensions)
+        if relevant_dimensions:
+            targets = [(subject, dimension) for subject in (subjects or [""])
+                       for dimension in relevant_dimensions
+                       if not gap_subjects or subject in gap_subjects]
+            if targets:
+                remaining = set(missing_coverage(question, verified, subjects=subjects))
+                if all(target not in remaining for target in targets):
+                    return assessment.model_copy(update={"level": "sufficient", "missing_information": ""})
+            return assessment
+    if verified and not missing_coverage(assessment.missing_information, verified):
+        return assessment.model_copy(update={"level": "sufficient", "missing_information": ""})
+    return assessment
+
+
+def _assessment_gap_in_selected_chunks(assessment: EvidenceReview | None,
+                                       sources: dict[str, AnswerSource]) -> bool:
+    """A coverage hint can justify verification, but cannot approve a claim."""
+    if not assessment or assessment.level != "partial":
+        return False
+    _, dimensions = requested_coverage(assessment.missing_information)
+    if not dimensions:
+        return False
+    passages = [CoveragePassage(item, sources[item].text,
+                sources[item].page_number, sources[item].chunk_index)
+                for item in assessment.chunk_ids if item in sources]
+    return bool(passages and all(item.status == "information_present" for item in
+                                coverage_report(assessment.missing_information, passages)))
 
 
 def _asks_for_paper_specific_fact(question: str) -> bool:
@@ -505,13 +791,34 @@ def _asks_for_paper_specific_fact(question: str) -> bool:
                 and re.search(r"\b(this|the|paper|study|experiment|trial)\b", question, re.I))
 
 
+def _requests_external_evidence(question: str) -> bool:
+    """Detect an explicit request to consult sources beyond the selected paper."""
+    explicit = re.search(
+        r"\b(?:search (?:the )?web|look (?:it )?up online|on the web|"
+        r"from (?:the )?(?:web|internet)|outside (?:this|the) (?:paper|pdf)|"
+        r"beyond (?:this|the) (?:paper|pdf))\b"
+        r"|\b(?:additional|other|outside|external)\s+"
+        r"(?:law|legal requirements?|regulations?|research|studies|sources|literature|evidence)\b"
+        r"|\band\b.{0,80}\b(?:current|latest|recent)\s+"
+        r"(?:law|legal requirements?|regulations?|research|studies|sources|literature)\b",
+        question, re.I)
+    if explicit:
+        return True
+    document_scope = re.search(
+        r"\b(?:in|from|according to)\s+(?:this|the|uploaded|selected)\s+"
+        r"(?:study|paper|pdf|document|article)\b"
+        r"|\b(?:does|did|is|was)\s+(?:this|the|uploaded|selected)\s+"
+        r"(?:study|paper|pdf|document|article)\s+(?:say|report|mention|state|describe)\b",
+        question, re.I)
+    return not document_scope and bool(re.search(
+        r"\b(?:current|latest|recent|published)\s+"
+        r"(?:law|legal requirements?|regulations?|research|studies|sources|literature|evidence)\b",
+        question, re.I))
+
+
 def _asks_only_about_pdf(question: str) -> bool:
     """Keep explicit document-scope questions within the selected PDF."""
-    if re.search(r"\b(?:outside|external|online|web|other sources|beyond the (?:paper|pdf)|"
-                 r"search (?:the )?web|additional research)\b"
-                 r"|\band\b.{0,80}\b(?:current|latest|recent)\s+"
-                 r"(?:law|legal requirements?|regulations?|research|studies|sources)\b",
-                 question, re.I):
+    if _requests_external_evidence(question):
         return False
     return bool(re.search(
         r"\b(?:this|the|uploaded|selected)\s+(?:paper|pdf|document|article)\b"
@@ -598,23 +905,45 @@ def _question_with_context(question: str, conversation: dict | None,
                            previous.strip(), re.I)
         if subject:
             return f"Why do we use {subject.group(1).rstrip('?.! ')}?"
-    return f"Previous question: {previous[:100]}\nFollow-up question: {question}"
+    # A short follow-up can refer to a subject introduced in the verified
+    # answer, even when that subject was absent from the earlier question.
+    prior_claims = previous_message.get("claims") or []
+    prior_pdf_claim = next((item.get("text", "") for item in prior_claims
+                            if item.get("section") == "pdf"
+                            and item.get("status") in ("supported", "contradicted")
+                            and item.get("supporting") and isinstance(item.get("text"), str)), "")
+    answer_context = f"\nPrevious verified PDF claim: {prior_pdf_claim[:160]}" if prior_pdf_claim else ""
+    return f"Previous question: {previous[:100]}{answer_context}\nFollow-up question: {question}"
+
+
+def _follow_up_uses_pdf(question: str, resolved_question: str, conversation: dict | None,
+                        reply_to_message_id: str | None = None) -> bool:
+    """A paper-bound conversation stays PDF-scoped unless external scope is requested."""
+    if not conversation or not conversation.get("messages") or _requests_external_evidence(question):
+        return False
+    if _asks_only_about_pdf(question):
+        return True
+    if resolved_question != question:
+        previous = (next((item for item in conversation["messages"]
+                          if item.get("id") == reply_to_message_id), None)
+                    if reply_to_message_id else conversation["messages"][-1])
+        if previous and _requests_external_evidence(previous.get("question", "")):
+            return False
+    return True
 
 
 @router.get("/capabilities")
 async def research_capabilities(
     request: Request,
     user: UserResponse = Depends(get_current_user),
-) -> dict[str, bool | str | None]:
+    ) -> dict[str, bool | int]:
     provider = getattr(request.app.state, "answer_provider", None)
     if provider is None:
-        return {"answer_generation": False, "key_revision": None}
+        return {"answer_generation": False, "retry_after_seconds": 0}
     available = getattr(provider, "available", None)
-    key = getattr(provider, "api_key", "")
-    revision = (hmac.new(get_settings().jwt_secret.encode(), key.encode(), sha256).hexdigest()[:16]
-                if isinstance(key, str) and key else None)
     return {"answer_generation": await run_in_threadpool(available) if available else True,
-            "key_revision": revision}
+            "retry_after_seconds": _cooldown_seconds(request, provider)
+            if isinstance(provider, GroqAnswerProvider) else 0}
 
 
 async def _retrieve(payload: SearchRequest, request: Request, user: UserResponse,
@@ -635,7 +964,7 @@ async def _retrieve(payload: SearchRequest, request: Request, user: UserResponse
         broad = bool(re.search(r"\b(?:both|compar\w*|combined|together|overall|universally)\b", question, re.I))
         initial = ingestion.vectors.search(user.id, payload.paper_id, embedding, payload.limit,
                                           question=question, candidate_limit=50 if broad else 25)
-        subjects, dimensions = requested_coverage(question)
+        subjects, dimensions = requested_coverage(question, [item.text for item in initial])
         def diagnose(stage: str, items: list[ChunkResponse]) -> list[tuple[str, str]]:
             report = coverage_report(question, [CoveragePassage(
                 f"c{item.chunk_index}-{item.content_hash[:12]}", item.text,
@@ -647,7 +976,7 @@ async def _retrieve(payload: SearchRequest, request: Request, user: UserResponse
                   item.information_ids, item.inferred_subject_ids)
                  for item in report])
             return [(item.subject, item.dimension) for item in report if item.status != "information_present"]
-        if not expand or (len(subjects) < 2 and len(dimensions) < 2):
+        if not expand or not dimensions:
             diagnose("initial", initial)
             return initial
         gaps = diagnose("initial", initial)
@@ -703,6 +1032,7 @@ async def search_paper(
 async def ask_paper(
     payload: AskRequest,
     request: Request,
+    response: Response,
     user: UserResponse = Depends(get_current_user),
 ):
     conversations: ConversationRepository = request.app.state.conversation_repository
@@ -711,6 +1041,7 @@ async def ask_paper(
                    "groq_rate_limits": 0, "groq_server_errors": 0, "groq_network_errors": 0,
                    "groq_rate_limit_kind": None}
     groq_trace.set(groq_counts)
+    groq_request_id.set(payload.request_id)
     conversation = None
     if payload.conversation_id:
         conversation = await conversations.find(user.id, payload.conversation_id)
@@ -721,6 +1052,7 @@ async def ask_paper(
             raise HTTPException(404, "Previous message not found in this conversation.")
 
     async def save_result(result: AskResponse) -> AskResponse:
+        response.delete_cookie(_GROQ_COOLDOWN_COOKIE, path="/api/v1/research")
         result.question = payload.question.strip()
         result.request_id = payload.request_id
         for key, value in groq_counts.items():
@@ -740,7 +1072,8 @@ async def ask_paper(
                 raise HTTPException(404, "Conversation not found.")
             result.conversation_id = payload.conversation_id
         else:
-            conversation = await conversations.create(user.id, payload.paper_id, message)
+            conversation = await conversations.create(user.id, payload.paper_id, message,
+                                                      paper_record.get("filename") if paper_record else None)
             result.conversation_id = conversation["_id"]
         result.message_id = message["id"]
         return result
@@ -771,6 +1104,9 @@ async def ask_paper(
                                      payload.request_id or "none", list(sources))
     evidence = [Evidence(id=source.id, text=_evidence_context(question_for_retrieval, source.text))
                 for source in sources.values()]
+    _log_evidence_handoff(payload.request_id, "retrieved", list(sources), sources)
+    _log_evidence_handoff(payload.request_id, "assessment_input", [item.id for item in evidence],
+                          sources, {item.id: item.text for item in evidence})
     assessment = None
     assess = getattr(provider, "assess", None)
     if assess:
@@ -791,7 +1127,7 @@ async def ask_paper(
                                                   request_id=payload.request_id)
         except AnswerRateLimitError as exc:
             raise HTTPException(429, "Evidence assessment is temporarily rate limited.",
-                                headers={"Retry-After": exc.retry_after}) from None
+                                headers=_rate_limit_headers(exc, provider)) from None
         except Exception as exc:
             raise HTTPException(502, "Evidence assessment failed. Try again later.") from exc
         if cache_key is not None and assessment is not None:
@@ -806,20 +1142,34 @@ async def ask_paper(
             raise HTTPException(502, "The PDF evidence assessment could not be validated. Try again later.")
         logging.getLogger(__name__).info("research_assessment request_id=%s level=%s source_ids=%s",
                                          payload.request_id or "none", assessment.level, assessment.chunk_ids)
+        _log_evidence_handoff(payload.request_id, "assessment_accepted", assessment.chunk_ids, sources)
 
-    pdf_comparison = len(requested_coverage(question_for_retrieval)[0]) >= 2
+    pdf_comparison = len(requested_coverage(question_for_retrieval,
+                         [source.text for source in sources.values()])[0]) >= 2
     quote_coverage_gap = bool(assessment and assessment.missing_information.startswith(
-        "The cited PDF quotes do not establish "))
+        "The selected PDF chunks contain information omitted from the cited quotes"))
+    candidate_coverage_gap = _assessment_gap_in_selected_chunks(assessment, sources)
     if assessment and assessment.level in ("partial", "none") and not (
             assessment.level == "partial" and (pdf_comparison or quote_coverage_gap)):
         pdf_sources = [sources[item] for item in assessment.chunk_ids]
-        if _asks_for_paper_specific_fact(question_for_retrieval) or _asks_only_about_pdf(question_for_retrieval):
-            detail = ("The retrieved PDF passages do not report that value. "
-                      "An external source cannot establish a statistic for this paper."
-                      if _asks_for_paper_specific_fact(question_for_retrieval) else
-                      ("The PDF supports part of this question. Missing from the retrieved PDF evidence: "
-                       f"{assessment.missing_information}" if assessment.level == "partial" else
-                       "The retrieved PDF passages do not establish the requested information."))
+        if (not _requests_external_evidence(payload.question)
+                and (not re.search(r"\b(?:law|regulations?)\b", payload.question, re.I)
+                     or _asks_only_about_pdf(payload.question))
+                or _asks_for_paper_specific_fact(question_for_retrieval)
+                or _asks_only_about_pdf(question_for_retrieval)
+                or _follow_up_uses_pdf(payload.question, question_for_retrieval,
+                                       conversation, payload.reply_to_message_id)):
+            if candidate_coverage_gap:
+                detail = ("The selected PDF chunk contains potentially relevant information, "
+                          "but the assessment quotes did not verify: " + assessment.missing_information)
+            elif _asks_for_paper_specific_fact(question_for_retrieval):
+                detail = ("The retrieved PDF passages do not report that value. "
+                          "An external source cannot establish a statistic for this paper.")
+            elif assessment.level == "partial":
+                detail = ("The PDF supports part of this question. The assessment could not verify: "
+                          + assessment.missing_information)
+            else:
+                detail = "The retrieved PDF passages do not establish the requested information."
             return await save_result(AskResponse(paper_id=payload.paper_id,
                 status="partially_supported" if pdf_sources else "not_mentioned", answer=detail,
                 sources=pdf_sources, assessment=assessment))
@@ -921,12 +1271,14 @@ async def ask_paper(
                 status="partially_supported" if pdf_sources else "not_mentioned", answer=answer,
                 sources=pdf_sources, external_sources=cited, assessment=assessment))
         try:
+            _log_evidence_handoff(payload.request_id, "generation_input", assessment.chunk_ids, sources,
+                                  {item.id: item.text for item in evidence})
             generated_external = await run_in_threadpool(provider.generate_with_external,
                 question_for_retrieval, [item for item in evidence if item.id in assessment.chunk_ids],
                 external, assessment.missing_information)
         except AnswerRateLimitError as exc:
             raise HTTPException(429, "Answer generation is temporarily rate limited.",
-                                headers={"Retry-After": exc.retry_after}) from None
+                                headers=_rate_limit_headers(exc, provider)) from None
         except Exception as exc:
             raise HTTPException(502, "External answer generation failed. Try again later.") from exc
         external_by_id = {item.id: item for item in external}
@@ -934,20 +1286,26 @@ async def ask_paper(
         external_ids = getattr(generated_external, "external_ids", None)
         pdf_text = getattr(generated_external, "pdf_text", None)
         external_text = getattr(generated_external, "external_text", None)
+        def unverified_external_answer() -> AskResponse:
+            if assessment.level == "partial" and pdf_sources:
+                return AskResponse(paper_id=payload.paper_id, status="partially_supported",
+                    answer=("The selected PDF passages contain related evidence, but the external "
+                            "answer could not be verified against its sources. No external claim is presented."),
+                    sources=pdf_sources, assessment=assessment)
+            return AskResponse(paper_id=payload.paper_id, status="insufficient_evidence",
+                answer="The external answer could not be linked to its sources.",
+                sources=pdf_sources, assessment=assessment)
         if (not isinstance(pdf_text, str) or not isinstance(external_text, str)
                 or not external_text.strip() or not isinstance(pdf_ids, list)
                 or not isinstance(external_ids, list) or any(item not in assessment.chunk_ids for item in pdf_ids)
                 or any(item not in external_by_id for item in external_ids)
                 or not external_ids or (assessment.level == "partial" and (not pdf_ids or not pdf_text.strip()))
                 or (assessment.level == "none" and pdf_ids)):
-            return await save_result(AskResponse(paper_id=payload.paper_id,
-                status="insufficient_evidence", answer="The external answer could not be linked to its sources.",
-                sources=pdf_sources, assessment=assessment))
+            return await save_result(unverified_external_answer())
         if (any(f"[{item}]" in pdf_text for item in external_by_id)
                 or any(f"[{item}]" in external_text for item in sources)):
-            return await save_result(AskResponse(paper_id=payload.paper_id,
-                status="insufficient_evidence", answer="The external answer did not cite its sources.",
-                sources=pdf_sources, assessment=assessment))
+            return await save_result(unverified_external_answer())
+        _log_evidence_handoff(payload.request_id, "generated_claims", pdf_ids, sources)
         try:
             checked_pdf, checked_external, claim_reviews = await _verified_sections(
                 provider, question_for_retrieval, pdf_text if assessment.level == "partial" else "",
@@ -955,12 +1313,21 @@ async def ask_paper(
                 request_id=payload.request_id, debug_claims=_local_claim_debug(request))
         except AnswerRateLimitError as exc:
             raise HTTPException(429, "Claim verification is temporarily rate limited.",
-                                headers={"Retry-After": exc.retry_after}) from None
+                                headers=_rate_limit_headers(exc, provider)) from None
         if not claim_reviews:
-            return await save_result(AskResponse(paper_id=payload.paper_id,
-                status="insufficient_evidence", answer="The generated claims could not be verified.",
-                sources=pdf_sources, assessment=assessment))
+            return await save_result(unverified_external_answer())
         used_ids = {quote.source_id for claim in claim_reviews for quote in claim.supporting + claim.opposing}
+        _log_evidence_handoff(payload.request_id, "verified_claims", sorted(used_ids), sources)
+        external_parts = _verified_answer_parts(question_for_retrieval, claim_reviews, sources)
+        external_subjects = list(dict.fromkeys(subject for subject, _, _, _ in external_parts))
+        external_aliases = {subject: f"subject_{index + 1}"
+                            for index, subject in enumerate(external_subjects)}
+        logging.getLogger("uvicorn.error").info(
+            "research_answer_parts request_id=%s parts=%s",
+            payload.request_id if isinstance(payload.request_id, str) and re.fullmatch(
+                r"[A-Za-z0-9_-]{1,64}", payload.request_id) else "none",
+            [(external_aliases.get(subject, "document"), dimension, status, ids)
+             for subject, dimension, status, ids in external_parts])
         cited_external = [_external_source(item) for item in external if item.id in used_ids]
         cited_pdf = [item for item in sources.values() if item.id in used_ids]
         pdf_section = (checked_pdf if assessment.level == "partial" else
@@ -980,11 +1347,13 @@ async def ask_paper(
                                              answer="I could not retrieve passages that support an answer.", sources=[]))
     if assessment:
         evidence = [item for item in evidence if item.id in assessment.chunk_ids]
+    _log_evidence_handoff(payload.request_id, "generation_input", [item.id for item in evidence],
+                          sources, {item.id: item.text for item in evidence})
     try:
         generated = await run_in_threadpool(provider.generate, question_for_retrieval, evidence)
     except AnswerRateLimitError as exc:
         raise HTTPException(429, "Answer generation is temporarily rate limited. Try again shortly.",
-                            headers={"Retry-After": exc.retry_after}) from None
+                            headers=_rate_limit_headers(exc, provider)) from None
     except Exception as exc:
         raise HTTPException(502, "Answer generation failed. Try again later.") from exc
 
@@ -1004,10 +1373,10 @@ async def ask_paper(
         raise HTTPException(502, "Answer generation returned an invalid evidence status.")
     if not isinstance(answer, str) or not answer.strip():
         return await save_result(AskResponse(paper_id=payload.paper_id, status="insufficient_evidence",
-                                             answer="The retrieved passages do not establish a reliable answer.", sources=[]))
+                                             answer="A reliable answer could not be verified from the generated claims and citations.", sources=[]))
     if answer.strip().casefold().rstrip("?.! ") == payload.question.strip().casefold().rstrip("?.! "):
         return await save_result(AskResponse(paper_id=payload.paper_id, status="insufficient_evidence",
-                                             answer="The retrieved passages do not establish a reliable answer.", sources=[]))
+                                             answer="A reliable answer could not be verified from the generated claims and citations.", sources=[]))
     if not isinstance(evidence_ids, list) or not evidence_ids or any(
         not isinstance(source_id, str) or source_id not in sources
         or (assessment is not None and source_id not in assessment.chunk_ids) for source_id in evidence_ids
@@ -1015,6 +1384,7 @@ async def ask_paper(
         return await save_result(AskResponse(paper_id=payload.paper_id, status="insufficient_evidence",
                                              answer="The proposed answer could not be linked to the retrieved passages.", sources=[]))
     cited = list(dict.fromkeys(evidence_ids))
+    _log_evidence_handoff(payload.request_id, "generated_claims", cited, sources)
     try:
         checked_pdf, _, claim_reviews = await _verified_sections(
             provider, question_for_retrieval, answer.strip(), "", cited, [],
@@ -1022,24 +1392,42 @@ async def ask_paper(
             debug_claims=_local_claim_debug(request))
     except AnswerRateLimitError as exc:
         raise HTTPException(429, "Claim verification is temporarily rate limited.",
-                            headers={"Retry-After": exc.retry_after}) from None
+                            headers=_rate_limit_headers(exc, provider)) from None
     if not claim_reviews:
         return await save_result(AskResponse(paper_id=payload.paper_id,
             status="insufficient_evidence", answer="The generated claims could not be verified.",
             sources=[], assessment=assessment))
+    assessment = _reconcile_assessment_gap(assessment, claim_reviews, question_for_retrieval, sources)
     used_ids = {quote.source_id for item in claim_reviews for quote in item.supporting + item.opposing}
-    comparison_gaps = _methodology_comparison_gaps(question_for_retrieval, claim_reviews)
+    _log_evidence_handoff(payload.request_id, "verified_claims", sorted(used_ids), sources)
+    comparison_gaps = _methodology_comparison_gaps(
+        question_for_retrieval, claim_reviews, [source.text for source in sources.values()])
+    answer_parts = _verified_answer_parts(question_for_retrieval, claim_reviews, sources)
+    subjects_for_log = list(dict.fromkeys(subject for subject, _, _, _ in answer_parts))
+    aliases = {subject: f"subject_{index + 1}" for index, subject in enumerate(subjects_for_log)}
+    logging.getLogger("uvicorn.error").info(
+        "research_answer_parts request_id=%s parts=%s",
+        payload.request_id if isinstance(payload.request_id, str) and re.fullmatch(
+            r"[A-Za-z0-9_-]{1,64}", payload.request_id) else "none",
+        [(aliases.get(subject, "document"), dimension, status, ids)
+         for subject, dimension, status, ids in answer_parts])
+    unresolved_parts = [(subject, dimension) for subject, dimension, part_status, _ in answer_parts
+                        if part_status != "supported"]
     if not any(item.status in ("supported", "partially_supported", "contradicted") for item in claim_reviews):
         status = "insufficient_evidence"
     elif any(item.status == "contradicted" for item in claim_reviews):
         status = "contradictory_evidence"
-    elif (assessment and assessment.level == "partial") or comparison_gaps or any(
+    elif (assessment and assessment.level == "partial") or comparison_gaps or unresolved_parts or any(
             item.status in ("partially_supported", "unsupported") for item in claim_reviews):
         status = "partially_supported"
         if assessment and assessment.missing_information and assessment.missing_information not in checked_pdf:
             checked_pdf = f"{checked_pdf} {assessment.missing_information}".strip()
         if comparison_gaps:
             checked_pdf = f"{checked_pdf} I could not verify {', '.join(comparison_gaps)} from the cited passages.".strip()
+        elif unresolved_parts and (not assessment or assessment.level == "sufficient"):
+            labels = ", ".join(f"{subject + ' ' if subject else ''}{dimension}"
+                                for subject, dimension in unresolved_parts)
+            checked_pdf = (f"{checked_pdf} The cited claims do not fully verify: {labels}.".strip())
     logging.getLogger(__name__).info("research_verification request_id=%s response_status=%s claim_statuses=%s source_ids=%s",
                                      payload.request_id or "none", status,
                                      [item.status for item in claim_reviews], sorted(used_ids))
@@ -1049,7 +1437,9 @@ async def ask_paper(
         payload.request_id or "none",
         [(item.subject, item.dimension, item.status, item.information_ids)
          for item in coverage_report(question_for_retrieval, verified,
-                                     {item.id for item in verified})],
+                                     {item.id for item in verified},
+                                     subjects=requested_coverage(question_for_retrieval,
+                                         [source.text for source in sources.values()])[0])],
         [(f"claim-{index}", [quote.source_id for quote in item.supporting])
          for index, item in enumerate(claim_reviews) if item.section == "pdf"
          and item.status == "supported" and item.supporting])

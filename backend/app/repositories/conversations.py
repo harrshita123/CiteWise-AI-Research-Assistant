@@ -13,12 +13,17 @@ class ConversationRepository:
         await self.collection.create_index([("owner_id", 1), ("updated_at", -1)])
         await self.collection.create_index([("owner_id", 1), ("paper_id", 1), ("updated_at", -1)])
 
-    async def create(self, owner_id: str, paper_id: str, message: dict[str, Any]) -> dict[str, Any]:
+    async def create(self, owner_id: str, paper_id: str, message: dict[str, Any],
+                     paper_filename: str | None = None) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         document = {
             "_id": uuid4().hex,
             "owner_id": owner_id,
             "paper_id": paper_id,
+            "paper_filename": paper_filename,
+            "title": message["question"],
+            "pinned": False,
+            "saved": True,
             "created_at": now,
             "updated_at": now,
             "messages": [message],
@@ -46,11 +51,19 @@ class ConversationRepository:
         )
         return result.matched_count == 1
 
-    async def list_for_user(self, owner_id: str, limit: int = 30) -> list[dict[str, Any]]:
+    async def list_for_user(self, owner_id: str) -> list[dict[str, Any]]:
         cursor = self.collection.find(
             {"owner_id": owner_id}, {"messages": {"$slice": -1}},
-        ).sort("updated_at", -1).limit(limit)
-        return await cursor.to_list(length=limit)
+        ).sort("updated_at", -1)
+        return await cursor.to_list(length=None)
+
+    async def update_metadata(self, owner_id: str, conversation_id: str,
+                              fields: dict[str, str | bool]) -> bool:
+        result = await self.collection.update_one(
+            {"_id": conversation_id, "owner_id": owner_id},
+            {"$set": {**fields, "updated_at": datetime.now(timezone.utc)}},
+        )
+        return result.matched_count == 1
 
     async def remove(self, owner_id: str, conversation_id: str) -> bool:
         result = await self.collection.delete_one({"_id": conversation_id, "owner_id": owner_id})

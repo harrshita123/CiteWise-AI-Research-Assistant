@@ -21,10 +21,13 @@ from app.providers.answers import (AnswerRateLimitError, ClaimAssessment, ClaimQ
 from app.providers.groq_answers import GroqAnswerProvider
 from app.providers.external_search import TavilyExternalSearch
 from app.routers.research import (_evidence_context, _evidence_excerpt, _generation_passages,
-                                  _asks_only_about_pdf, _methodology_comparison_gaps, _question_with_context,
-                                  _validate_assessment, _verified_sections,
+                                  _asks_only_about_pdf, _follow_up_uses_pdf,
+                                  _methodology_comparison_gaps, _question_with_context,
+                                  _validate_assessment, _reconcile_assessment_gap, _coverage_gap_message,
+                                  _verified_answer_parts,
+                                  _assessment_gap_in_selected_chunks, _verified_sections,
                                   _local_claim_debug, _retrieve, AnswerSource, ClaimQuoteResponse, ClaimReviewResponse,
-                                  SearchRequest, router)
+                                  EvidenceReview, SearchRequest, router)
 from app.services.evidence_coverage import missing_coverage, requested_coverage
 from app.services.claim_verification import split_claims
 from app.services.pdf_processing import TextChunk
@@ -119,10 +122,11 @@ class Conversations:
     def __init__(self):
         self.items = {}
 
-    async def create(self, owner_id, paper_id, message):
+    async def create(self, owner_id, paper_id, message, paper_filename=None):
         now = datetime.now(timezone.utc)
         item = {"_id": f"conversation-{len(self.items) + 1}", "owner_id": owner_id,
-                "paper_id": paper_id, "created_at": now, "updated_at": now, "messages": [message]}
+                "paper_id": paper_id, "paper_filename": paper_filename, "title": message["question"],
+                "pinned": False, "saved": True, "created_at": now, "updated_at": now, "messages": [message]}
         self.items[item["_id"]] = item
         return item
 
@@ -138,7 +142,16 @@ class Conversations:
         return True
 
     async def list_for_user(self, owner_id):
-        return [item for item in self.items.values() if item["owner_id"] == owner_id]
+        return sorted((item for item in self.items.values() if item["owner_id"] == owner_id),
+                      key=lambda item: item["updated_at"], reverse=True)
+
+    async def update_metadata(self, owner_id, conversation_id, fields):
+        item = await self.find(owner_id, conversation_id)
+        if item is None:
+            return False
+        item.update(fields)
+        item["updated_at"] = datetime.now(timezone.utc)
+        return True
 
     async def remove(self, owner_id, conversation_id):
         item = await self.find(owner_id, conversation_id)
@@ -249,6 +262,111 @@ class ResearchTests(unittest.TestCase):
         self.assertTrue(_asks_only_about_pdf("What does this paper say about privacy?"))
         self.assertFalse(_asks_only_about_pdf("What are the current legal requirements in India?"))
         self.assertFalse(_asks_only_about_pdf("What does this paper say and what do external sources say?"))
+
+    def test_contextual_pdf_follow_up_keeps_partial_evidence_without_external_search(self):
+        search = ExternalSearch()
+        self.client.app.state.external_search = search
+        provider = AssessedAnswers(EvidenceAssessment("sufficient", ["c0-hash-a"],
+            supporting_quotes=[EvidenceQuote("c0-hash-a", "Alpha result")]))
+        self.client.app.state.answer_provider = provider
+        first = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "Alpha?"})
+        self.assertEqual(first.status_code, 200)
+        provider.assessment = EvidenceAssessment("partial", ["c0-hash-a"],
+            "The result's statistical uncertainty was not verified.",
+            [EvidenceQuote("c0-hash-a", "Alpha result")])
+        follow_up = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "Was that result statistically established?",
+            "conversation_id": first.json()["conversation_id"]})
+        self.assertEqual(follow_up.status_code, 200)
+        body = follow_up.json()
+        self.assertEqual(body["status"], "partially_supported")
+        self.assertEqual(body["search_trace"]["tavily_calls"], 0)
+        self.assertEqual(body["external_sources"], [])
+        self.assertEqual([item["id"] for item in body["sources"]], ["c0-hash-a"])
+        self.assertEqual(search.queries, [])
+        self.assertEqual(provider.external_calls, 0)
+        self.assertNotIn("external answer", body["answer"].lower())
+
+    def test_follow_up_scope_uses_current_request_and_paper_bound_parent(self):
+        conversation = {"messages": [{"id": "first", "question":
+            "What did Trial Maple report about recovery?"}]}
+        self.assertTrue(_follow_up_uses_pdf("Was that difference reliable?",
+            "Previous question: What did Trial Maple report about recovery?\n"
+            "Follow-up question: Was that difference reliable?", conversation, "first"))
+        self.assertTrue(_follow_up_uses_pdf("How were participants selected?",
+            "How were participants selected?", conversation, "first"))
+        self.assertFalse(_follow_up_uses_pdf("Compare that with recent literature.",
+            "Previous question: What did Trial Maple report about recovery?\n"
+            "Follow-up question: Compare that with recent literature.", conversation, "first"))
+        self.assertTrue(_follow_up_uses_pdf("Did this PDF discuss online learning?",
+            "Did this PDF discuss online learning?", conversation, "first"))
+        external_parent = {"messages": [{"id": "first", "question":
+            "What do external sources report about recovery?"}]}
+        self.assertFalse(_follow_up_uses_pdf("What about that?",
+            "Previous question: What do external sources report about recovery?\n"
+            "Follow-up question: What about that?", external_parent, "first"))
+        self.assertTrue(_follow_up_uses_pdf("What does this PDF say about recovery?",
+            "What does this PDF say about recovery?", external_parent, "first"))
+        self.assertTrue(_asks_only_about_pdf("What does this PDF report about current law?"))
+        self.assertFalse(_asks_only_about_pdf(
+            "What does this PDF report, and what does current law require?"))
+
+    def test_short_follow_up_can_retrieve_subject_from_verified_prior_answer(self):
+        conversation = {"messages": [{"id": "first", "question": "What was reported?",
+            "claims": [{"text": "Trial Maple reported reduced recovery time.",
+                        "section": "pdf", "status": "supported",
+                        "supporting": [{"source_id": "c1", "quote": "reduced recovery time"}]},
+                       {"text": "Trial Cedar reported a larger effect.",
+                        "section": "pdf", "status": "unsupported", "supporting": []}]}]}
+        resolved = _question_with_context("What were its limitations?", conversation, "first")
+        self.assertIn("Trial Maple reported reduced recovery time", resolved)
+        self.assertNotIn("Trial Cedar", resolved)
+        self.assertTrue(resolved.endswith("Follow-up question: What were its limitations?"))
+
+    def test_contextual_follow_up_explicitly_requesting_external_evidence_still_searches(self):
+        search = ExternalSearch()
+        self.client.app.state.external_search = search
+        provider = AssessedAnswers(EvidenceAssessment("sufficient", ["c0-hash-a"],
+            supporting_quotes=[EvidenceQuote("c0-hash-a", "Alpha result")]))
+        self.client.app.state.answer_provider = provider
+        first = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "Alpha?"})
+        self.assertEqual(first.status_code, 200)
+        provider.assessment = EvidenceAssessment("partial", ["c0-hash-a"],
+            "External context is missing.", [EvidenceQuote("c0-hash-a", "Alpha result")])
+        follow_up = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "How does that Alpha result compare with recent research outside this PDF?",
+            "conversation_id": first.json()["conversation_id"]})
+        self.assertEqual(follow_up.status_code, 200)
+        self.assertEqual(follow_up.json()["search_trace"]["tavily_calls"], 1)
+        self.assertEqual(follow_up.json()["external_sources"][0]["id"], "ext1")
+        self.assertEqual(follow_up.json()["external_sources"][0]["url"],
+                         "https://example.org/study")
+        self.assertEqual([item["id"] for item in follow_up.json()["sources"]], ["c0-hash-a"])
+        self.assertTrue(any(item["section"] == "external" and item["status"] == "supported"
+                            for item in follow_up.json()["claims"]))
+        self.assertEqual(provider.external_calls, 1)
+
+    def test_invalid_external_generation_retains_pdf_evidence_without_external_claim(self):
+        class InvalidExternal(AssessedAnswers):
+            def generate_with_external(self, question, pdf_evidence, external_evidence, missing_information):
+                self.external_calls += 1
+                return ExternalAnswer("PDF result [c0-hash-a].", "Uncited external assertion.",
+                                      ["c0-hash-a"], [])
+
+        self.client.app.state.external_search = ExternalSearch()
+        self.client.app.state.answer_provider = InvalidExternal(EvidenceAssessment(
+            "partial", ["c0-hash-a"], "External context is missing.",
+            [EvidenceQuote("c0-hash-a", "Alpha result")]))
+        result = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "Compare this PDF with external research on Alpha."})
+        self.assertEqual(result.status_code, 200)
+        body = result.json()
+        self.assertEqual(body["status"], "partially_supported")
+        self.assertEqual([item["id"] for item in body["sources"]], ["c0-hash-a"])
+        self.assertEqual(body["external_sources"], [])
+        self.assertNotIn("Uncited external assertion", body["answer"])
         self.assertFalse(_asks_only_about_pdf("What does this paper say, and what is the current law?"))
 
     def test_retrieval_recovers_second_study_outside_dense_candidates(self):
@@ -284,6 +402,35 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(next(item.page_number for item in expanded if item.chunk_index == 7), 8)
         self.assertTrue(all("Bob's" not in item.text for item in expanded))
 
+    def test_single_dimension_gap_expands_retrieval_without_changing_paper_scope(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        vectors = VectorRepository(Path(directory.name))
+        chunks = [TextChunk(index, index + 1, f"Background note {index} on the trial.",
+                            f"background-{index}") for index in range(6)]
+        chunks.append(TextChunk(6, 9, "The intervention lasted 12 weeks.", "duration"))
+        vectors.save("alice", "paper-1", chunks, [[1.0, 0.0]] * 6 + [[0.0, 1.0]])
+        vectors.save("bob", "paper-1", [TextChunk(7, 10, "The intervention lasted 20 weeks.",
+                                                    "other-owner")], [[0.0, 1.0]])
+
+        class FocusedEmbeddings:
+            def embed(self, questions):
+                return [[0.0, 1.0] if text.startswith("duration") else [1.0, 0.0]
+                        for text in questions]
+
+        ingestion = Ingestion(vectors)
+        ingestion.embeddings = FocusedEmbeddings()
+        self.client.app.state.ingestion_service = ingestion
+        request = Request({"type": "http", "app": self.client.app})
+        user = UserResponse(id="alice", email="alice@example.com", role="user")
+        payload = SearchRequest(paper_id="paper-1", question="What was the duration?", limit=5)
+        initial = asyncio.run(_retrieve(payload, request, user))
+        expanded = asyncio.run(_retrieve(payload, request, user, expand=True))
+        self.assertFalse(any(item.chunk_index == 6 for item in initial))
+        self.assertTrue(any(item.chunk_index == 6 and item.page_number == 9 for item in expanded))
+        self.assertFalse(any(item.chunk_index == 7 for item in expanded))
+        self.assertLessEqual(len(expanded), 10)
+
     def test_sufficient_assessment_is_downgraded_when_quote_misses_requested_part(self):
         question = "Compare Study A and Study B designs and participants."
         a = AnswerSource(id="cA", chunk_index=0, page_number=1, content_hash="a",
@@ -296,6 +443,340 @@ class ResearchTests(unittest.TestCase):
         validated = _validate_assessment(assessment, question, {"cA": a, "cB": b})
         self.assertEqual(validated.level, "partial")
         self.assertIn("Study B participants", validated.missing_information)
+        self.assertIn("omitted from the cited quotes", validated.missing_information)
+        self.assertNotIn("do not establish Study B participants", validated.missing_information)
+
+    def test_assessment_context_retains_fact_outside_best_sentence_window(self):
+        text = ("The survey examined remote work and attendance. "
+                "The survey examined remote work and attendance again. "
+                "Participants: 48 nurses. The observation lasted six months.")
+        context = _evidence_context("How many participants were in the survey?", text)
+        self.assertIn("48 nurses", context)
+        self.assertIn("six months", context)
+        self.assertLessEqual(len(context), 2400)
+
+    def test_evidence_handoff_logs_chunk_provenance_without_private_text(self):
+        passage = ChunkResponse(chunk_index=4, page_number=7, content_hash="tracehash",
+            text="Trial Juniper measured recovery in 54 patients.")
+        source_id = "c4-tracehash"
+
+        class Provider:
+            def assess(self, question, evidence):
+                return EvidenceAssessment("sufficient", [source_id], supporting_quotes=[
+                    EvidenceQuote(source_id, "Trial Juniper measured recovery in 54 patients")])
+
+            def generate(self, question, evidence):
+                return GeneratedAnswer(f"Trial Juniper included 54 patients [{source_id}].", [source_id])
+
+            def verify_claims(self, question, claims, evidence):
+                return [ClaimAssessment(item["id"], "supported", [ClaimQuote(
+                    source_id, "Trial Juniper measured recovery in 54 patients")], []) for item in claims]
+
+        self.client.app.state.answer_provider = Provider()
+        with patch("app.routers.research._retrieve", return_value=[passage]), \
+                self.assertLogs("uvicorn.error", level="INFO") as logs:
+            response = self.client.post("/api/v1/research/ask", json={
+                "paper_id": "paper-1", "question": "How many patients were included?",
+                "request_id": "trace-123"})
+        self.assertEqual(response.status_code, 200)
+        events = "\n".join(logs.output)
+        for stage in ("retrieved", "assessment_input", "assessment_quoted",
+                      "assessment_accepted", "generation_input", "generated_claims", "verified_claims"):
+            self.assertIn(f"stage={stage}", events)
+        self.assertIn("request_id=trace-123", events)
+        self.assertIn("c4-tracehash", events)
+        self.assertIn("'page_number': 7", events)
+        self.assertNotIn("Trial Juniper measured", events)
+        self.assertNotIn("How many patients", events)
+
+    def test_verified_answer_parts_use_claim_status_and_cited_source(self):
+        sources = {
+            "c1": AnswerSource(id="c1", chunk_index=0, page_number=1, content_hash="one",
+                highlight_text="", text="Trial Juniper enrolled 54 patients for six months. Recovery improved."),
+            "c2": AnswerSource(id="c2", chunk_index=1, page_number=2, content_hash="two",
+                highlight_text="", text="Trial Willow enrolled 60 patients. Recovery was unchanged."),
+        }
+        claims = [
+            ClaimReviewResponse(text="Trial Juniper enrolled 54 patients.", section="pdf",
+                status="supported", supporting=[ClaimQuoteResponse(source_id="c1", quote="54 patients")], opposing=[]),
+            ClaimReviewResponse(text="Trial Juniper lasted six months.", section="pdf",
+                status="supported", supporting=[ClaimQuoteResponse(source_id="c1", quote="six months")], opposing=[]),
+            ClaimReviewResponse(text="Trial Willow enrolled 60 patients.", section="pdf",
+                status="partially_supported", supporting=[ClaimQuoteResponse(source_id="c2",
+                    quote="Trial Willow enrolled 60 patients")], opposing=[]),
+            ClaimReviewResponse(text="Trial Willow improved recovery.", section="pdf",
+                status="unsupported", supporting=[], opposing=[]),
+        ]
+        parts = _verified_answer_parts(
+            "Compare both studies' participants, duration and findings.", claims, sources)
+        self.assertIn(("Trial Juniper", "participants", "supported", ["c1"]), parts)
+        self.assertIn(("Trial Juniper", "duration", "supported", ["c1"]), parts)
+        self.assertIn(("Trial Willow", "participants", "partially_supported", ["c2"]), parts)
+        self.assertIn(("Trial Willow", "findings", "unsupported", []), parts)
+        self.assertIn(("Trial Willow", "duration", "unsupported", []), parts)
+
+    def test_implicit_comparison_final_gap_keeps_each_study_separate(self):
+        claims = [ClaimReviewResponse(text="Trial Juniper enrolled 54 patients.", section="pdf",
+            status="supported", supporting=[ClaimQuoteResponse(source_id="c1", quote="54 patients")],
+            opposing=[])]
+        gaps = _methodology_comparison_gaps("Compare both studies' participants.", claims,
+            ["Trial Juniper enrolled 54 patients.", "Trial Willow enrolled 60 patients."])
+        self.assertIn("Trial Willow's participants", gaps)
+
+    def test_answer_part_tracking_across_factual_numerical_and_synthesis_requests(self):
+        source = AnswerSource(id="c7", chunk_index=7, page_number=4, content_hash="seven",
+            highlight_text="", text="Cohort Ember used interviews with 31 participants. Retention improved.")
+        cases = [
+            ("What was Cohort Ember's design?", "Cohort Ember used interviews.", "design"),
+            ("How many participants were in Cohort Ember?", "Cohort Ember included 31 participants.",
+             "participants"),
+            ("What were Cohort Ember's findings?", "Cohort Ember reported improved retention.",
+             "findings"),
+        ]
+        for question, statement, dimension in cases:
+            with self.subTest(dimension=dimension):
+                claim = ClaimReviewResponse(text=statement, section="pdf", status="supported",
+                    supporting=[ClaimQuoteResponse(source_id="c7", quote=source.text)], opposing=[])
+                parts = _verified_answer_parts(question, [claim], {"c7": source})
+                self.assertIn(("Cohort Ember", dimension, "supported", ["c7"]), parts)
+
+    def test_verified_answer_does_not_claim_complete_when_requested_part_is_omitted(self):
+        passage = ChunkResponse(chunk_index=5, page_number=3, content_hash="juniper",
+            text="Trial Juniper used interviews and enrolled 54 participants.")
+        source_id = "c5-juniper"
+
+        class Provider:
+            def assess(self, question, evidence):
+                return EvidenceAssessment("sufficient", [source_id], supporting_quotes=[
+                    EvidenceQuote(source_id, passage.text)])
+
+            def generate(self, question, evidence):
+                return GeneratedAnswer(f"Trial Juniper used interviews [{source_id}].", [source_id])
+
+            def verify_claims(self, question, claims, evidence):
+                return [ClaimAssessment(item["id"], "supported", [ClaimQuote(source_id,
+                    "Trial Juniper used interviews")], []) for item in claims]
+
+        self.client.app.state.answer_provider = Provider()
+        with patch("app.routers.research._retrieve", return_value=[passage]):
+            response = self.client.post("/api/v1/research/ask", json={
+                "paper_id": "paper-1", "question": "How many participants were in Trial Juniper?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "partially_supported")
+        self.assertIn("cited claims", response.json()["answer"])
+        self.assertNotIn("entire PDF", response.json()["answer"])
+
+    def test_long_assessment_context_keeps_requested_fact_within_budget(self):
+        text = ("The survey examined remote work and attendance. " * 65
+                + "Participants: 48 patients. The observation lasted six months.")
+        context = _evidence_context("How many participants were in the survey?", text)
+        self.assertIn("48 patients", context)
+        self.assertLessEqual(len(context), 2400)
+
+    def test_single_overlong_sentence_keeps_late_requested_fact(self):
+        text = "Background context " * 170 + "participants numbered 54 patients"
+        context = _evidence_context("How many participants were there?", text)
+        self.assertIn("54 patients", context)
+        self.assertLessEqual(len(context), 2400)
+
+    def test_assessment_gap_distinguishes_absent_fact_from_omitted_quote(self):
+        source = AnswerSource(id="c0", chunk_index=0, page_number=1, content_hash="a",
+            highlight_text="", text="Trial Meridian used a cohort design. Participants: 48 patients.")
+        assessment = EvidenceAssessment("sufficient", ["c0"], supporting_quotes=[
+            EvidenceQuote("c0", "Trial Meridian used a cohort design")])
+        result = _validate_assessment(assessment,
+            "What were Trial Meridian's design, participants and duration?", {"c0": source})
+        self.assertEqual(result.level, "partial")
+        self.assertIn("omitted from the cited quotes for Trial Meridian participants", result.missing_information)
+        self.assertIn("do not establish Trial Meridian duration", result.missing_information)
+
+    def test_implicit_subject_gap_uses_original_subject_identity_after_filtering(self):
+        source = AnswerSource(id="c1", chunk_index=3, page_number=2, content_hash="one",
+            highlight_text="", text="Trial Willow enrolled 60 participants.")
+        result = _coverage_gap_message("Compare both studies' participant counts.",
+            [("Trial Willow", "participants")], {"c1": source}, ["c1"],
+            subjects=["Trial Juniper", "Trial Willow"])
+        self.assertIn("omitted from the cited quotes for Trial Willow participants", result)
+        self.assertNotIn("do not establish Trial Willow participants", result)
+
+    def test_partial_assessment_does_not_report_unrequested_dimension(self):
+        source = AnswerSource(id="c1", chunk_index=1, page_number=1, content_hash="one",
+            highlight_text="", text="Trial Willow reported improved recovery.")
+        reviewed = _validate_assessment(EvidenceAssessment("partial", ["c1"],
+            "duration was not established", [EvidenceQuote("c1", "Trial Willow reported improved recovery")]),
+            "What findings did Trial Willow report?", {"c1": source})
+        self.assertIsNotNone(reviewed)
+        self.assertEqual(reviewed.level, "partial")
+        self.assertNotIn("duration", reviewed.missing_information)
+        self.assertIn("requested", reviewed.missing_information)
+
+    def test_partial_assessment_does_not_mix_requested_and_unrequested_gaps(self):
+        source = AnswerSource(id="c1", chunk_index=1, page_number=1, content_hash="one",
+            highlight_text="", text="Trial Willow reported improved recovery.")
+        reviewed = _validate_assessment(EvidenceAssessment("partial", ["c1"],
+            "findings and duration could not be verified",
+            [EvidenceQuote("c1", "Trial Willow reported improved recovery")]),
+            "What findings did Trial Willow report?", {"c1": source})
+        self.assertIsNotNone(reviewed)
+        self.assertNotIn("duration", reviewed.missing_information)
+        self.assertIn("requested", reviewed.missing_information)
+
+    def test_unnamed_comparison_gap_needs_both_studies_verified(self):
+        sources = {
+            "c1": AnswerSource(id="c1", chunk_index=1, page_number=1, content_hash="one",
+                highlight_text="", text="Trial Juniper enrolled 54 participants."),
+            "c2": AnswerSource(id="c2", chunk_index=2, page_number=2, content_hash="two",
+                highlight_text="", text="Trial Willow enrolled 60 participants."),
+        }
+        assessment = EvidenceReview(level="partial", chunk_ids=list(sources),
+            missing_information="participant counts remain unverified")
+        one_claim = ClaimReviewResponse(text="Trial Juniper enrolled 54 participants.", section="pdf",
+            status="supported", supporting=[ClaimQuoteResponse(source_id="c1", quote="54 participants")],
+            opposing=[])
+        question = "Compare both studies' participant counts."
+        unresolved = _reconcile_assessment_gap(assessment, [one_claim], question, sources)
+        self.assertEqual(unresolved.level, "partial")
+        both_claims = [one_claim, ClaimReviewResponse(text="Trial Willow enrolled 60 participants.",
+            section="pdf", status="supported", supporting=[ClaimQuoteResponse(source_id="c2",
+                quote="60 participants")], opposing=[])]
+        resolved = _reconcile_assessment_gap(assessment, both_claims, question, sources)
+        self.assertEqual(resolved.level, "sufficient")
+
+    def test_verified_claim_resolves_matching_assessment_gap(self):
+        assessment = EvidenceReview(level="partial", chunk_ids=["c0"],
+            missing_information="Trial Meridian participants")
+        claim = ClaimReviewResponse(text="Trial Meridian included 48 patients.", section="pdf",
+            status="supported", supporting=[ClaimQuoteResponse(source_id="c0", quote="48 patients")],
+            opposing=[])
+        resolved = _reconcile_assessment_gap(assessment, [claim])
+        self.assertEqual(resolved.level, "sufficient")
+        self.assertEqual(resolved.missing_information, "")
+        self.assertEqual(assessment.level, "partial")
+        absent = _reconcile_assessment_gap(EvidenceReview(level="partial", chunk_ids=["c0"],
+            missing_information="Trial Meridian duration"), [claim])
+        self.assertEqual(absent.level, "partial")
+        self.assertIn("duration", absent.missing_information)
+
+    def test_partly_resolved_assessment_keeps_only_unverified_gap(self):
+        source = AnswerSource(id="c0", chunk_index=0, page_number=1, content_hash="a",
+            highlight_text="", text="Trial Meridian used a cohort design. Participants: 48 patients.")
+        question = "What were Trial Meridian's design, participants and duration?"
+        assessment = EvidenceReview(level="partial", chunk_ids=["c0"],
+            missing_information=("The selected PDF chunks contain information omitted from the cited "
+                                 "quotes for Trial Meridian participants. The selected PDF chunks do not "
+                                 "establish Trial Meridian duration."))
+        claim = ClaimReviewResponse(text="Trial Meridian included 48 patients.", section="pdf",
+            status="supported", supporting=[ClaimQuoteResponse(source_id="c0", quote="48 patients")],
+            opposing=[])
+        remaining = _reconcile_assessment_gap(assessment, [claim], question, {"c0": source})
+        self.assertEqual(remaining.level, "partial")
+        self.assertIn("Trial Meridian duration", remaining.missing_information)
+        self.assertNotIn("Trial Meridian participants", remaining.missing_information)
+
+    def test_resolved_gap_does_not_reopen_other_assessed_parts(self):
+        sources = {"c0": AnswerSource(id="c0", chunk_index=0, page_number=2,
+            content_hash="a", highlight_text="",
+            text="Trial Meridian used a cohort design and enrolled 48 patients.")}
+        assessment = EvidenceReview(level="partial", chunk_ids=["c0"],
+            missing_information="The selected PDF chunks contain information omitted from the cited quotes for Trial Meridian participants.")
+        claim = ClaimReviewResponse(text="Trial Meridian enrolled 48 patients.", section="pdf",
+            status="supported", supporting=[ClaimQuoteResponse(source_id="c0",
+                quote="enrolled 48 patients")], opposing=[])
+        resolved = _reconcile_assessment_gap(assessment, [claim],
+            "What were Trial Meridian's design and participant count?", sources)
+        self.assertEqual(resolved.level, "sufficient")
+        self.assertEqual(resolved.missing_information, "")
+
+    def test_reconciliation_keeps_subject_dimension_pairs_separate(self):
+        sources = {
+            "c0": AnswerSource(id="c0", chunk_index=0, page_number=1, content_hash="a",
+                highlight_text="", text="Trial Cedar enrolled 42 patients."),
+            "c1": AnswerSource(id="c1", chunk_index=1, page_number=2, content_hash="b",
+                highlight_text="", text="Trial Maple lasted six weeks."),
+        }
+        assessment = EvidenceReview(level="partial", chunk_ids=list(sources),
+            missing_information=("The selected PDF chunks do not establish Trial Cedar participants, "
+                                 "Trial Maple duration."))
+        claims = [ClaimReviewResponse(text="Trial Cedar enrolled 42 patients.", section="pdf",
+            status="supported", supporting=[ClaimQuoteResponse(source_id="c0",
+                quote="enrolled 42 patients")], opposing=[])]
+        result = _reconcile_assessment_gap(assessment, claims,
+            "Compare Trial Cedar and Trial Maple participant counts and duration.", sources)
+        self.assertIn("Trial Maple duration", result.missing_information)
+        self.assertNotIn("Trial Cedar participants", result.missing_information)
+        self.assertNotIn("Trial Cedar duration", result.missing_information)
+
+    def test_implicit_comparison_gap_is_not_cleared_by_one_study_claim(self):
+        sources = {
+            "c1": AnswerSource(id="c1", chunk_index=0, page_number=1, content_hash="a",
+                highlight_text="", text="Trial Solstice used a cohort design."),
+            "c2": AnswerSource(id="c2", chunk_index=1, page_number=2, content_hash="b",
+                highlight_text="", text="Trial Polaris used a randomized design."),
+        }
+        assessment = EvidenceReview(level="partial", chunk_ids=list(sources),
+            missing_information="The selected PDF chunks do not establish Trial Polaris design.")
+        claim = ClaimReviewResponse(text="Trial Solstice used a cohort design.", section="pdf",
+            status="supported", supporting=[ClaimQuoteResponse(source_id="c1",
+                quote="Trial Solstice used a cohort design")], opposing=[])
+        remaining = _reconcile_assessment_gap(assessment, [claim],
+            "Compare both studies' designs.", sources)
+        self.assertEqual(remaining.level, "partial")
+        self.assertIn("Trial Polaris design", remaining.missing_information)
+
+    def test_selected_chunk_gap_is_sent_to_normal_verification(self):
+        source = AnswerSource(id="c0", chunk_index=0, page_number=1, content_hash="a",
+            highlight_text="", text="Trial Meridian used a cohort design. Participants: 48 patients.")
+        assessment = EvidenceReview(level="partial", chunk_ids=["c0"],
+            missing_information="Trial Meridian participants")
+        self.assertTrue(_assessment_gap_in_selected_chunks(assessment, {"c0": source}))
+        self.assertFalse(_assessment_gap_in_selected_chunks(EvidenceReview(
+            level="partial", chunk_ids=["c0"], missing_information="Trial Meridian duration"),
+            {"c0": source}))
+
+    def test_verified_answer_clears_assessment_gap_in_final_response(self):
+        passage = ChunkResponse(chunk_index=3, page_number=2, content_hash="meridian",
+            text="Trial Meridian used a cohort design. Participants: 48 patients.")
+        source_id = "c3-meridian"
+
+        class Provider:
+            def assess(self, question, evidence):
+                return EvidenceAssessment("sufficient", [source_id], supporting_quotes=[
+                    EvidenceQuote(source_id, "Trial Meridian used a cohort design")])
+
+            def generate(self, question, evidence):
+                return GeneratedAnswer(
+                    f"Trial Meridian used a cohort design and included 48 patients [{source_id}].",
+                    [source_id])
+
+            def verify_claims(self, question, claims, evidence):
+                return [ClaimAssessment(item["id"], "supported", [ClaimQuote(
+                    source_id, passage.text)], []) for item in claims]
+
+        self.client.app.state.answer_provider = Provider()
+        with patch("app.routers.research._retrieve", return_value=[passage]):
+            response = self.client.post("/api/v1/research/ask", json={
+                "paper_id": "paper-1", "question": "What does this PDF report about Trial Meridian design and participants?"})
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertEqual(result["assessment"]["level"], "sufficient")
+        self.assertEqual(result["assessment"]["missing_information"], "")
+        self.assertEqual(result["status"], "answered")
+        self.assertIn("48 patients", result["answer"])
+        self.assertNotIn("could not", result["answer"])
+
+    def test_invalid_or_unrelated_assessment_quote_still_rejected(self):
+        source = AnswerSource(id="c0", chunk_index=0, page_number=1, content_hash="a",
+            highlight_text="", text="Trial Meridian included 48 patients.")
+        invalid = EvidenceAssessment("sufficient", ["c0"], supporting_quotes=[
+            EvidenceQuote("c0", "Trial Meridian included 80 patients")])
+        self.assertIsNone(_validate_assessment(invalid, "How many patients were in Trial Meridian?",
+                                              {"c0": source}))
+        unrelated = AnswerSource(id="c1", chunk_index=1, page_number=2, content_hash="b",
+            highlight_text="", text="The archives catalogued medieval maps and manuscripts.")
+        irrelevant = EvidenceAssessment("sufficient", ["c1"], supporting_quotes=[
+            EvidenceQuote("c1", "The archives catalogued medieval maps and manuscripts")])
+        self.assertIsNone(_validate_assessment(irrelevant,
+                                              "How many patients were in Trial Meridian?", {"c1": unrelated}))
 
     def test_partial_comparison_is_not_reported_as_a_complete_answer(self):
         question = ("Compare the methodologies used in Study A and Study B. "
@@ -473,7 +954,8 @@ class ResearchTests(unittest.TestCase):
                     EvidenceQuote(item, sources[item].text) for item in expected_ids])
                 result = _validate_assessment(proposed, question, sources)
                 self.assertEqual(result.level,
-                    "partial" if question.startswith("Compare Study A and Study B") else "sufficient")
+                    "partial" if ("both studies" in question or
+                                  question.startswith("Compare Study A and Study B")) else "sufficient")
                 self.assertEqual(result.chunk_ids, expected_ids)
                 absent = _validate_assessment(EvidenceAssessment("none", []), question, sources)
                 self.assertFalse(absent and absent.level == "sufficient")
@@ -549,15 +1031,40 @@ class ResearchTests(unittest.TestCase):
                          ["sufficient", "sufficient"])
         self.assertTrue(all(reply.json()["search_trace"]["tavily_calls"] == 0 for reply in replies))
 
-    def test_capabilities_key_revision_changes_without_exposing_key(self):
+    def test_capabilities_preserve_same_key_cooldown_and_clear_changed_key(self):
+        provider = GroqAnswerProvider("first-test-key", "model", 10)
+        self.client.app.state.answer_provider = provider
+        with patch.object(provider, "assess", side_effect=AnswerRateLimitError("90")):
+            limited = self.client.post("/api/v1/research/ask", json={
+                "paper_id": "paper-1", "question": "Alpha?"})
+        self.assertEqual(limited.status_code, 429)
+        self.assertIn("HttpOnly", limited.headers["set-cookie"])
+        self.assertNotIn("first-test-key", limited.headers["set-cookie"])
+        initial = self.client.get("/api/v1/research/capabilities").json()
+        self.assertGreater(initial["retry_after_seconds"], 0)
+        self.assertNotIn("key_revision", initial)
+
         self.client.app.state.answer_provider = GroqAnswerProvider("first-test-key", "model", 10)
-        first = self.client.get("/api/v1/research/capabilities").json()
+        restarted = self.client.get("/api/v1/research/capabilities").json()
+        self.assertGreater(restarted["retry_after_seconds"], 0)
         self.client.app.state.answer_provider = GroqAnswerProvider("second-test-key", "model", 10)
-        second = self.client.get("/api/v1/research/capabilities").json()
-        self.assertTrue(first["answer_generation"])
-        self.assertNotEqual(first["key_revision"], second["key_revision"])
-        self.assertNotIn("first-test-key", str(first))
-        self.assertNotIn("second-test-key", str(second))
+        changed = self.client.get("/api/v1/research/capabilities").json()
+        self.assertEqual(changed["retry_after_seconds"], 0)
+        self.assertNotIn("key_revision", changed)
+        self.assertNotIn("second-test-key", str(changed))
+
+        self.client.app.state.answer_provider = provider
+        with patch.object(provider, "assess", return_value=EvidenceAssessment(
+                "sufficient", ["c0-hash-a"], supporting_quotes=[
+                    EvidenceQuote("c0-hash-a", "Alpha result")])), \
+                patch.object(provider, "generate", return_value=GeneratedAnswer(
+                    "Alpha result [c0-hash-a].", ["c0-hash-a"])), \
+                patch.object(provider, "verify_claims", return_value=[ClaimAssessment(
+                    "claim-1", "supported", [ClaimQuote("c0-hash-a", "Alpha result")], [])]):
+            answered = self.client.post("/api/v1/research/ask", json={
+                "paper_id": "paper-1", "question": "Alpha?"})
+        self.assertEqual(answered.status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/research/capabilities").json()["retry_after_seconds"], 0)
 
     def test_rejects_missing_or_unready_paper_and_blank_question(self):
         for paper_id, status in (("foreign", 404), ("pending", 409)):
@@ -631,7 +1138,13 @@ class ResearchTests(unittest.TestCase):
 
         provider.assessment = EvidenceAssessment("partial", ["c0-hash-a"], "Beta details",
             [EvidenceQuote("c0-hash-a", "Alpha result")])
-        partial = self.client.post("/api/v1/research/ask", json=payload)
+        document_partial = self.client.post("/api/v1/research/ask", json=payload)
+        self.assertEqual(document_partial.status_code, 200)
+        self.assertEqual(document_partial.json()["status"], "partially_supported")
+        self.assertEqual(document_partial.json()["search_trace"]["tavily_calls"], 0)
+        self.assertEqual(search.queries, [])
+        partial = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "Compare Alpha with external research."})
         self.assertEqual(partial.status_code, 200)
         self.assertEqual(partial.json()["assessment"]["chunk_ids"], ["c0-hash-a"])
         self.assertEqual(partial.json()["external_sources"][0]["url"], "https://example.org/study")
@@ -687,7 +1200,7 @@ class ResearchTests(unittest.TestCase):
              "content": "Books and lending schedules."},
             {"title": "Webcam privacy research", "url": "https://example.edu/research",
              "content": "Webcam privacy result."}]}
-        payload = {"paper_id": "paper-1", "question": "webcam privacy effects"}
+        payload = {"paper_id": "paper-1", "question": "external research on webcam privacy effects"}
         with patch("app.providers.external_search.requests.post", return_value=response) as post:
             fresh = self.client.post("/api/v1/research/ask", json=payload)
             cached = self.client.post("/api/v1/research/ask", json=payload)
@@ -711,7 +1224,7 @@ class ResearchTests(unittest.TestCase):
             "url": "https://example.edu/privacy", "content": "External result about webcam privacy."}]}
         with patch("app.providers.external_search.requests.post", side_effect=[empty, found]) as post:
             response = self.client.post("/api/v1/research/ask", json={
-                "paper_id": "paper-1", "question": "What does research say about webcam privacy?"})
+                "paper_id": "paper-1", "question": "What does external research say about webcam privacy?"})
         self.assertEqual(response.status_code, 200)
         trace = response.json()["search_trace"]
         self.assertEqual(post.call_count, 2)
@@ -724,7 +1237,7 @@ class ResearchTests(unittest.TestCase):
         self.client.app.state.external_search = TavilyExternalSearch("test-key")
         with patch("app.providers.external_search.requests.post", side_effect=TimeoutError) as post:
             response = self.client.post("/api/v1/research/ask", json={
-                "paper_id": "paper-1", "question": "What does research say about webcam privacy?"})
+                "paper_id": "paper-1", "question": "What does external research say about webcam privacy?"})
         self.assertEqual(post.call_count, 1)
         self.assertEqual(response.json()["search_trace"]["external_search_timeouts"], 1)
         self.assertEqual(response.json()["search_trace"]["fallback_searches"], 0)
@@ -865,7 +1378,7 @@ class ResearchTests(unittest.TestCase):
                 "quote_not_found_or_order_mismatch", 1, 1),
         ]
         for assessment, reason, cited_count, quote_count in cases:
-            with self.subTest(reason=reason), self.assertLogs("app.routers.research", level="INFO") as logs:
+            with self.subTest(reason=reason), self.assertLogs("uvicorn.error", level="INFO") as logs:
                 self.assertIsNone(_validate_assessment(assessment, "Private question", {"c0": source},
                                                         request_id="req-123"))
             self.assertEqual(len(logs.output), 1)
@@ -881,7 +1394,7 @@ class ResearchTests(unittest.TestCase):
         self.client.app.state.answer_provider = AssessedAnswers(EvidenceAssessment(
             "sufficient", ["unknown"], supporting_quotes=[
                 EvidenceQuote("unknown", "Private invented quotation")]))
-        with self.assertLogs("app.routers.research", level="INFO") as logs:
+        with self.assertLogs("uvicorn.error", level="INFO") as logs:
             response = self.client.post("/api/v1/research/ask", json={
                 "paper_id": "paper-1", "question": "Private question", "request_id": "req-456"})
         self.assertEqual(response.status_code, 502)
@@ -1007,7 +1520,7 @@ class ResearchTests(unittest.TestCase):
             EvidenceQuote("cA", "Study A participants: 2,400 students"),
             EvidenceQuote("cB", "Study B participants: 780 students"),
             EvidenceQuote("cTable", "Design Cluster-randomized ... Study B ... Matched-course comparison")])
-        with self.assertLogs("app.routers.research", level="INFO") as captured:
+        with self.assertLogs("uvicorn.error", level="INFO") as captured:
             result = _validate_assessment(assessment, question, sources)
         self.assertIsNone(result)
         self.assertTrue(any("reason=quote_not_found_or_order_mismatch" in line
@@ -1073,7 +1586,104 @@ class ResearchTests(unittest.TestCase):
             incomplete = _validate_assessment(EvidenceAssessment("sufficient", ["cA"],
                 supporting_quotes=exact[:omitted] + exact[omitted + 1:] + [redundant]),
                 question, {"cA": source})
-            self.assertIsNone(incomplete)
+            self.assertIsNotNone(incomplete)
+            self.assertEqual(incomplete.level, "partial")
+
+    def test_five_sources_sixteen_quotes_recover_when_valid_quotes_cover_question(self):
+        question = "What were Trial Cedar's design and participant count?"
+        sources = {}
+        quotes = []
+        for index in range(5):
+            source_id = f"c{index}"
+            text = (f"Trial Cedar site {index} used a cohort design. "
+                    f"Participants: {40 + index} patients. Observation period: six months.")
+            sources[source_id] = AnswerSource(id=source_id, chunk_index=index,
+                page_number=index + 1, content_hash=str(index), highlight_text="", text=text)
+            quotes.extend([
+                EvidenceQuote(source_id, f"Trial Cedar site {index} used a cohort design"),
+                EvidenceQuote(source_id, f"Participants: {40 + index} patients"),
+                EvidenceQuote(source_id, "Observation period: six months"),
+            ])
+        quotes.append(EvidenceQuote("c4", "Trial Cedar site 4 used an experimental design"))
+        assessment = EvidenceAssessment("sufficient", list(sources), supporting_quotes=quotes)
+        validated = _validate_assessment(assessment, question, sources)
+        self.assertIsNotNone(validated)
+        self.assertEqual(validated.level, "sufficient")
+        self.assertEqual(validated.chunk_ids, list(sources))
+
+        # When every participant quote is invalid, source text alone cannot
+        # rescue the assessment or authorize the sufficient label.
+        missing = [quote for quote in quotes if not quote.quote.startswith("Participants:")]
+        missing += [EvidenceQuote(f"c{index}", f"Participants: {90 + index} patients")
+                    for index in range(5)]
+        partial = _validate_assessment(EvidenceAssessment(
+            "sufficient", list(sources), supporting_quotes=missing), question, sources,
+            request_id="quote-case")
+        self.assertEqual(partial.level, "partial")
+        self.assertIn("participants", partial.missing_information)
+
+    def test_quote_matching_accepts_punctuation_but_rejects_reordered_ellipsis(self):
+        source = AnswerSource(id="c0", chunk_index=0, page_number=1, content_hash="a",
+            highlight_text="", text="The cohort enrolled 48 patients; follow-up lasted six months.")
+        punctuation = EvidenceAssessment("sufficient", ["c0"], supporting_quotes=[
+            EvidenceQuote("c0", "The cohort enrolled 48 patients, follow-up lasted six months")])
+        self.assertIsNotNone(_validate_assessment(punctuation,
+            "How many patients did the cohort enroll?", {"c0": source}))
+        reversed_quote = EvidenceAssessment("sufficient", ["c0"], supporting_quotes=[
+            EvidenceQuote("c0", "follow-up lasted six months ... The cohort enrolled 48 patients")])
+        with self.assertLogs("uvicorn.error", level="INFO") as logs:
+            self.assertIsNone(_validate_assessment(reversed_quote,
+                "How many patients did the cohort enroll?", {"c0": source}))
+        self.assertIn("order_mismatch", "\n".join(logs.output))
+
+    def test_invalid_quotes_leave_only_partially_covered_study(self):
+        sources = {
+            "cA": AnswerSource(id="cA", chunk_index=0, page_number=1, content_hash="a",
+                highlight_text="", text="Trial Solstice used a randomized design. Participants: 48 nurses."),
+            "cB": AnswerSource(id="cB", chunk_index=1, page_number=2, content_hash="b",
+                highlight_text="", text="Trial Polaris used a cohort design. Participants: 72 nurses."),
+        }
+        assessment = EvidenceAssessment("sufficient", ["cA", "cB"], supporting_quotes=[
+            EvidenceQuote("cA", "Trial Solstice used a randomized design"),
+            EvidenceQuote("cA", "Participants: 48 nurses"),
+            EvidenceQuote("cB", "Trial Polaris used a cohort design"),
+            EvidenceQuote("cB", "Participants: 72 nurses ... Trial Polaris used a cohort design"),
+            EvidenceQuote("cB", "cohort design ... Trial Polaris used"),
+        ])
+        question = "Compare both studies' designs and participants."
+        result = _validate_assessment(assessment, question, sources, request_id="coverage-123")
+        self.assertEqual(result.level, "partial")
+        self.assertIn("Trial Polaris participants", result.missing_information)
+        self.assertNotIn("Trial Solstice participants", result.missing_information)
+
+    def test_implicit_comparison_with_four_invalid_quotes_returns_partial(self):
+        source_one = AnswerSource(id="c1", chunk_index=0, page_number=1, content_hash="a",
+            highlight_text="", text=("Trial Solstice used a randomized design with 48 patients "
+                "at two clinics for six months. The measured outcome decreased by 4%. "
+                "The authors noted selection bias."))
+        source_two = AnswerSource(id="c2", chunk_index=1, page_number=2, content_hash="b",
+            highlight_text="", text=("Trial Polaris used a cohort design with 72 patients "
+                "at three clinics for one year. The measured outcome did not change. "
+                "The authors noted a short follow-up."))
+        assessment = EvidenceAssessment("sufficient", ["c1", "c2"], supporting_quotes=[
+            EvidenceQuote("c1", "Trial Solstice used a randomized design with 48 patients"),
+            EvidenceQuote("c1", "The measured outcome decreased by 4%"),
+            EvidenceQuote("c2", "Trial Polaris used a cohort design"),
+            EvidenceQuote("c1", "six months ... at two clinics"),
+            EvidenceQuote("c1", "selection bias ... The authors noted"),
+            EvidenceQuote("c2", "one year ... at three clinics"),
+            EvidenceQuote("c2", "short follow-up ... The authors noted"),
+        ])
+        question = ("Compare both studies' designs, participants, settings, duration, "
+                    "findings and limitations.")
+        with self.assertLogs("app.routers.research", level="INFO"):
+            reviewed = _validate_assessment(assessment, question, {"c1": source_one, "c2": source_two})
+        self.assertIsNotNone(reviewed)
+        self.assertEqual(reviewed.level, "partial")
+        self.assertEqual(reviewed.chunk_ids, ["c1", "c2"])
+        self.assertIn("Trial Polaris participants", reviewed.missing_information)
+        self.assertIn("Trial Polaris findings", reviewed.missing_information)
+        self.assertNotIn("Trial Solstice findings", reviewed.missing_information)
 
     def test_evidence_excerpt_selects_answering_sentence(self):
         text = ("OCLC provides several discovery services. "
@@ -1196,6 +1806,10 @@ class ResearchTests(unittest.TestCase):
         response = self.client.post("/api/v1/research/ask", json=payload)
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.headers["retry-after"], "12")
+        self.client.app.state.answer_provider = Answers(AnswerRateLimitError())
+        response = self.client.post("/api/v1/research/ask", json=payload)
+        self.assertEqual(response.status_code, 429)
+        self.assertNotIn("retry-after", response.headers)
         response = self.client.post("/api/v1/research/ask", json={**payload, "paper_id": "foreign"})
         self.assertEqual(response.status_code, 404)
 
@@ -1221,6 +1835,71 @@ class ResearchTests(unittest.TestCase):
         }).status_code, 404)
         self.assertEqual(self.client.delete(f"/api/v1/research/conversations/{conversation_id}").status_code, 204)
         self.assertEqual(self.client.get(f"/api/v1/research/conversations/{conversation_id}").status_code, 404)
+
+    def test_conversation_metadata_is_owner_scoped_and_shared_by_all_views(self):
+        self.client.app.state.answer_provider = Answers(GeneratedAnswer("Alpha result.", ["c0-hash-a"]))
+        first = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1", "question": "First topic?"}).json()
+        second = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1", "question": "Second topic?"}).json()
+        first_id, second_id = first["conversation_id"], second["conversation_id"]
+        path = f"/api/v1/research/conversations/{first_id}"
+        updated = self.client.patch(path, json={"title": "Renamed topic", "pinned": True})
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual((updated.json()["title"], updated.json()["pinned"], updated.json()["paper_filename"]),
+                         ("Renamed topic", True, "paper.pdf"))
+        self.assertTrue(self.client.get(path).json()["pinned"])
+        self.assertFalse(self.client.patch(path, json={"saved": False}).json()["saved"])
+        self.assertTrue(self.client.get(path).json()["pinned"])
+        self.assertTrue(self.client.patch(path, json={"saved": True}).json()["saved"])
+        follow_up = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "What about that?", "conversation_id": first_id})
+        self.assertEqual(follow_up.status_code, 200)
+        self.assertEqual(follow_up.json()["conversation_id"], first_id)
+        listed = self.client.get("/api/v1/research/conversations").json()
+        self.assertEqual({item["id"] for item in listed}, {first_id, second_id})
+        self.assertEqual(next(item for item in listed if item["id"] == first_id)["title"], "Renamed topic")
+        self.assertEqual(len(self.client.get(path).json()["messages"]), 2)
+        self.assertEqual(self.client.patch(path, json={"pinned": False}).json()["pinned"], False)
+        self.assertFalse(self.client.get(path).json()["pinned"])
+        self.assertFalse(self.client.patch(path, json={"saved": False}).json()["saved"])
+        self.assertFalse(self.client.get(path).json()["saved"])
+        self.assertFalse(next(item for item in self.client.get("/api/v1/research/conversations").json()
+                              if item["id"] == first_id)["saved"])
+        self.assertTrue(self.client.patch(path, json={"saved": True}).json()["saved"])
+        for invalid in ({"title": "  "}, {"pinned": None}, {"saved": None}, {}):
+            self.assertEqual(self.client.patch(path, json=invalid).status_code, 422)
+        self.assertEqual(self.client.patch("/api/v1/research/conversations/missing", json={"pinned": True}).status_code, 404)
+        self.client.app.state.conversation_repository.items[first_id]["owner_id"] = "bob"
+        self.assertEqual(self.client.patch(path, json={"title": "Stolen"}).status_code, 404)
+        self.assertEqual(self.client.get(path).status_code, 404)
+        self.assertEqual({item["id"] for item in self.client.get("/api/v1/research/conversations").json()}, {second_id})
+        self.assertTrue(self.client.patch(f"/api/v1/research/conversations/{second_id}",
+                                          json={"pinned": True}).json()["pinned"])
+        self.assertEqual(self.client.delete(f"/api/v1/research/conversations/{second_id}").status_code, 204)
+        self.assertEqual(self.client.get("/api/v1/research/conversations").json(), [])
+        self.assertEqual(asyncio.run(self.client.app.state.paper_repository.find("alice", "paper-1"))["filename"],
+                         "paper.pdf")
+
+    def test_conversation_list_includes_more_than_thirty_and_legacy_filenames(self):
+        self.client.app.state.answer_provider = Answers(GeneratedAnswer("Alpha result.", ["c0-hash-a"]))
+        response = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1", "question": "Topic?"})
+        self.assertEqual(response.status_code, 200)
+        repository = self.client.app.state.conversation_repository
+        original = repository.items[response.json()["conversation_id"]]
+        original.pop("paper_filename")
+        original.pop("title")
+        original.pop("pinned")
+        original.pop("saved")
+        for index in range(35):
+            item = {**original, "_id": f"extra-{index}", "paper_id": "paper-1",
+                    "updated_at": original["updated_at"]}
+            repository.items[item["_id"]] = item
+        repository.items["other-owner"] = {**original, "_id": "other-owner", "owner_id": "bob"}
+        listed = self.client.get("/api/v1/research/conversations")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(len(listed.json()), 36)
+        self.assertTrue(all(item["paper_filename"] == "paper.pdf" for item in listed.json()))
+        self.assertTrue(all(item["title"] == "Topic?" and item["pinned"] is False
+                            and item["saved"] is False for item in listed.json()))
 
     def test_sequential_and_concurrent_answers_keep_request_question_and_parent(self):
         class QuestionAnswers(Answers):
