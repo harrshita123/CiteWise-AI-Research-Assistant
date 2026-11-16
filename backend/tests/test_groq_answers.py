@@ -4,11 +4,23 @@ import requests
 from unittest.mock import Mock, patch
 
 from app.providers.answers import AnswerRateLimitError, Evidence, ExternalEvidence
-from app.providers.groq_answers import GroqAnswerProvider, _retry_delay
+from app.providers.groq_answers import GroqAnswerProvider, _retry_delay, groq_request_id
 from app.providers.external_search import TavilyExternalSearch
 
 
 class GroqAnswerTests(unittest.TestCase):
+    def test_assessment_prompt_requests_separate_ordered_comparison_quotes(self):
+        provider = GroqAnswerProvider("test-key", "model", 10)
+        with patch.object(provider, "_complete", return_value={
+            "level": "partial", "chunk_ids": ["c1"], "missing_information": "one comparison side",
+            "supporting_quotes": [{"chunk_id": "c1", "quote": "The trial enrolled 48 patients"}],
+        }) as complete:
+            provider.assess("Compare both trials' methods.", [Evidence("c1", "The trial enrolled 48 patients.")])
+        prompt = complete.call_args.args[2]
+        self.assertIn("each requested dimension for each study separately", prompt)
+        self.assertIn("original source order", prompt)
+        self.assertEqual(complete.call_count, 1)
+
     def test_calibration_uses_existing_generation_and_verification_calls(self):
         provider = GroqAnswerProvider("test-key", "model", 10)
         with patch.object(provider, "_complete", side_effect=[
@@ -84,6 +96,24 @@ class GroqAnswerTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].url, "https://example.edu/study")
         self.assertEqual(post.call_args.kwargs["json"]["include_answer"], False)
+
+    def test_external_search_discards_missing_metadata_and_keeps_stable_valid_ids(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {"results": [
+            {"title": "Recovery evidence", "content": "Recovery was measured."},
+            {"title": "Recovery evidence", "url": "https://example.edu/empty"},
+            {"title": "Recovery evidence", "url": "http://example.edu/insecure",
+             "content": "Recovery was measured."},
+            {"title": "Recovery evidence", "url": "https://example.edu/valid",
+             "content": "Recovery was measured in a cohort."},
+        ]}
+        with patch("app.providers.external_search.requests.post", return_value=response):
+            outcome = TavilyExternalSearch("test-key").search_with_trace("recovery cohort")
+        self.assertEqual(outcome.raw_results, 4)
+        self.assertEqual([item.id for item in outcome.results], ["ext1"])
+        self.assertEqual(outcome.results[0].url, "https://example.edu/valid")
+        self.assertEqual(outcome.invalid_urls, 2)
+        self.assertEqual(outcome.invalid_results, 1)
 
     def test_indian_legal_search_keeps_only_official_sources(self):
         response = Mock(status_code=200)
@@ -262,12 +292,84 @@ class GroqAnswerTests(unittest.TestCase):
 
     def test_rate_limit_exposes_only_retry_delay(self):
         response = Mock(status_code=429, headers={"retry-after": "12"})
-        with patch("app.providers.groq_answers.requests.post", return_value=response), patch("app.providers.groq_answers.time.sleep") as sleep:
+        with patch("app.providers.groq_answers.requests.post", return_value=response) as post, \
+                patch("app.providers.groq_answers.time.sleep") as sleep:
             with self.assertRaises(AnswerRateLimitError) as caught:
                 GroqAnswerProvider("test-key", "openai/gpt-oss-120b", 120).generate(
                     "Question?", [Evidence("c1", "Evidence.")])
         self.assertEqual(caught.exception.retry_after, "12")
-        self.assertEqual(sleep.call_count, 2)
+        post.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_rate_limit_diagnostic_uses_only_safe_fields(self):
+        response = Mock(status_code=429, headers={
+            "retry-after": "65", "x-ratelimit-limit-requests": "30",
+            "x-ratelimit-remaining-requests": "0", "x-ratelimit-reset-requests": "1m5s",
+            "x-ratelimit-limit-tokens": "8000", "x-ratelimit-remaining-tokens": "7100",
+            "x-ratelimit-reset-tokens": "25s"})
+        response.json.return_value = {"error": {"type": "rate_limit_error", "code": "rate_limit_exceeded",
+                                                 "message": "private question and PDF text"}}
+        token = groq_request_id.set("request-123")
+        try:
+            with patch("app.providers.groq_answers.requests.post", return_value=response) as post, \
+                    self.assertLogs("uvicorn.error", level="WARNING") as logs:
+                with self.assertRaises(AnswerRateLimitError) as caught:
+                    GroqAnswerProvider("private-api-key", "model", 10)._complete("test", {}, "system", "user")
+        finally:
+            groq_request_id.reset(token)
+        self.assertEqual(caught.exception.retry_after, "65")
+        post.assert_called_once()
+        event = logs.output[0]
+        for field in ("request_id=request-123", "status=429", "error_type=rate_limit_error",
+                      "error_code=rate_limit_exceeded", "retry_source=retry-after",
+                      "x_ratelimit_remaining_requests': '0'", "x_ratelimit_reset_tokens': '25s'"):
+            self.assertIn(field, event)
+        for private in ("private-api-key", "private question", "PDF text", "system", "user"):
+            self.assertNotIn(private, event)
+
+    def test_rate_limit_uses_exhausted_token_reset_without_retry_after(self):
+        response = Mock(status_code=429, headers={
+            "x-ratelimit-remaining-requests": "12", "x-ratelimit-reset-requests": "10s",
+            "x-ratelimit-remaining-tokens": "0", "x-ratelimit-reset-tokens": "2m15s"})
+        response.json.return_value = {"error": {"type": "rate_limit_error"}}
+        with patch("app.providers.groq_answers.requests.post", return_value=response) as post, \
+                self.assertLogs("uvicorn.error", level="WARNING") as logs:
+            with self.assertRaises(AnswerRateLimitError) as caught:
+                GroqAnswerProvider("key", "model", 10)._complete("test", {}, "system", "user")
+        self.assertEqual(caught.exception.retry_after, "135")
+        self.assertIn("retry_source=quota-reset retry_seconds=135", logs.output[0])
+        post.assert_called_once()
+
+    def test_rate_limit_uses_exhausted_request_reset_without_retry_after(self):
+        response = Mock(status_code=429, headers={
+            "x-ratelimit-remaining-requests": "0", "x-ratelimit-reset-requests": "45s"})
+        response.json.return_value = {"error": {"code": "rate_limit_exceeded"}}
+        with patch("app.providers.groq_answers.requests.post", return_value=response) as post:
+            with self.assertRaises(AnswerRateLimitError) as caught:
+                GroqAnswerProvider("key", "model", 10)._complete("test", {}, "system", "user")
+        self.assertEqual(caught.exception.retry_after, "45")
+        post.assert_called_once()
+
+    def test_rate_limit_without_usable_provider_timing_has_unknown_retry(self):
+        response = Mock(status_code=429, headers={"x-ratelimit-reset-tokens": "1m",
+                                                   "x-ratelimit-remaining-tokens": "unknown",
+                                                   "x-ratelimit-limit-tokens": "private PDF text"})
+        response.json.return_value = {"error": {"message": "private PDF text"}}
+        token = groq_request_id.set("bad\nrequest")
+        try:
+            with patch("app.providers.groq_answers.requests.post", return_value=response) as post, \
+                    patch("app.providers.groq_answers.time.sleep") as sleep, \
+                    self.assertLogs("uvicorn.error", level="WARNING") as logs:
+                with self.assertRaises(AnswerRateLimitError) as caught:
+                    GroqAnswerProvider("key", "model", 10)._complete("test", {}, "system", "user")
+        finally:
+            groq_request_id.reset(token)
+        self.assertIsNone(caught.exception.retry_after)
+        self.assertIn("request_id=none", logs.output[0])
+        self.assertIn("retry_source=unknown retry_seconds=None", logs.output[0])
+        self.assertNotIn("private PDF text", logs.output[0])
+        post.assert_called_once()
+        sleep.assert_not_called()
 
     def test_retry_transient_response_then_success(self):
         provider = GroqAnswerProvider("test-key", "model", 10)

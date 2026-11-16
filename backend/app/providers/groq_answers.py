@@ -1,5 +1,7 @@
 import json
+import logging
 import math
+import re
 import time
 from collections import OrderedDict
 from contextvars import ContextVar
@@ -16,6 +18,51 @@ from .answers import (AnswerRateLimitError, ClaimAssessment, ClaimQuote, Evidenc
 
 # A mutable value is shared with threadpool calls, but each HTTP request gets its own context.
 groq_trace: ContextVar[dict[str, int | str | None] | None] = ContextVar("groq_trace", default=None)
+groq_request_id: ContextVar[str | None] = ContextVar("groq_request_id", default=None)
+
+_RATE_HEADERS = ("retry-after", "x-ratelimit-limit-requests", "x-ratelimit-remaining-requests",
+                 "x-ratelimit-reset-requests", "x-ratelimit-limit-tokens",
+                 "x-ratelimit-remaining-tokens", "x-ratelimit-reset-tokens")
+
+
+def _safe_field(value: object, pattern: str = r"[A-Za-z0-9_.-]{1,64}") -> str | None:
+    return value if isinstance(value, str) and re.fullmatch(pattern, value) else None
+
+
+def _safe_rate_header(name: str, value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    if name == "retry-after":
+        return value if _retry_delay(value) is not None else None
+    if "reset" in name:
+        return value if _reset_delay(value) is not None else None
+    return value if re.fullmatch(r"\d+(?:\.\d+)?", value) else None
+
+
+def _reset_delay(value: str | None) -> float | None:
+    """Parse provider reset durations without guessing from an unrecognized format."""
+    if not value:
+        return None
+    parts = re.findall(r"(\d+(?:\.\d+)?)([dhms])", value.strip().lower())
+    if not parts or "".join(f"{amount}{unit}" for amount, unit in parts) != value.strip().lower():
+        return None
+    delay = sum(float(amount) * {"d": 86400, "h": 3600, "m": 60, "s": 1}[unit]
+                for amount, unit in parts)
+    return delay if math.isfinite(delay) and delay <= 7 * 86400 else None
+
+
+def _rate_limit_delay(headers) -> tuple[float | None, str]:
+    delay = _retry_delay(headers.get("retry-after"))
+    if delay is not None:
+        return delay, "retry-after"
+    resets = []
+    for quota in ("requests", "tokens"):
+        remaining = headers.get(f"x-ratelimit-remaining-{quota}")
+        if isinstance(remaining, str) and remaining.strip() == "0":
+            reset = _reset_delay(headers.get(f"x-ratelimit-reset-{quota}"))
+            if reset is not None:
+                resets.append(reset)
+    return (max(resets), "quota-reset") if resets else (None, "unknown")
 
 
 def _retry_delay(value: str | None) -> float | None:
@@ -103,21 +150,38 @@ class GroqAnswerProvider:
                 if trace is not None:
                     key = "groq_rate_limits" if response.status_code == 429 else "groq_server_errors"
                     trace[key] += 1
-                    if response.status_code == 429:
-                        try:
-                            detail = str(response.json().get("error", {}).get("message", "")).casefold()
-                        except (ValueError, TypeError, AttributeError):
-                            detail = ""
+                if response.status_code == 429:
+                    try:
+                        error = response.json().get("error", {})
+                    except (ValueError, TypeError, AttributeError):
+                        error = {}
+                    error = error if isinstance(error, dict) else {}
+                    detail = error.get("message", "")
+                    if trace is not None:
+                        detail = detail.casefold() if isinstance(detail, str) else ""
                         trace["groq_rate_limit_kind"] = (
                             "tokens" if "token" in detail else
                             "requests" if "request" in detail else "unknown")
+                    delay, delay_source = _rate_limit_delay(response.headers)
+                    safe_headers = {name.replace("-", "_"): _safe_rate_header(
+                        name, response.headers.get(name))
+                        for name in _RATE_HEADERS}
+                    logging.getLogger("uvicorn.error").warning(
+                        "groq_rate_limited request_id=%s status=429 error_type=%s error_code=%s "
+                        "retry_source=%s retry_seconds=%s quota_headers=%s",
+                        _safe_field(groq_request_id.get()) or "none",
+                        _safe_field(error.get("type")) or "unknown",
+                        _safe_field(error.get("code")) or "unknown",
+                        delay_source, math.ceil(delay) if delay is not None else None, safe_headers)
+                    if trace is not None:
+                        trace["groq_failures"] += 1
+                    raise AnswerRateLimitError(str(max(1, math.ceil(delay)))
+                                               if delay is not None and delay > 0 else None)
                 header_delay = _retry_delay(response.headers.get("retry-after"))
                 delay = header_delay if header_delay is not None else min(2 ** attempt, 4)
                 if attempt == 2 or delay > 30:
                     if trace is not None:
                         trace["groq_failures"] += 1
-                    if response.status_code == 429:
-                        raise AnswerRateLimitError(str(max(1, math.ceil(delay))))
                     response.raise_for_status()
             if trace is not None:
                 trace["groq_retries"] += 1
@@ -140,6 +204,8 @@ class GroqAnswerProvider:
             "none means they establish no relevant facts. Return supporting chunk IDs for sufficient or partial, "
             "and an empty list for none. For each cited chunk return one or more short verbatim supporting quotes. "
             "For a multi-part question inspect every supplied excerpt before declaring a requested fact missing. "
+            "For comparisons, quote each requested dimension for each study separately; if a part lacks a quote, mark it partial. "
+            "Keep quoted fragments in their original source order, including table text. "
             "The quote must establish a relevant fact, not merely repeat topic words. "
             "Use empty quotes for none. State exactly what is missing for partial. "
             "For claims about a specific paper's missing statistic, do not propose web research as a substitute. "

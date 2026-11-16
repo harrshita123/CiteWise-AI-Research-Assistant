@@ -71,7 +71,7 @@ class ClaimAssessment:
 
 
 class AnswerRateLimitError(Exception):
-    def __init__(self, retry_after: str = "60"):
+    def __init__(self, retry_after: str | None = None):
         self.retry_after = retry_after
         super().__init__("Answer provider rate limit reached.")
 
