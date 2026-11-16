@@ -1,11 +1,14 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { Link, Navigate, useSearchParams } from "react-router-dom";
+import { Navigate, useOutletContext, useSearchParams } from "react-router-dom";
 import { AuthApiError, getCurrentUser, SignedInUser } from "../services/authApi";
-import { listPapers, paperFileUrl, Paper } from "../services/papersApi";
-import { answerGenerationAvailable, askPaper, AskResult, Conversation, deleteConversation, getConversation, listConversations, ResearchApiError, RetrievedPassage, SavedMessage, saveAnswerFeedback, searchPaper } from "../services/researchApi";
-import { evidenceLabel, evidenceText } from "../utils/evidenceOutcome";
+import { getPaper, listPapers, paperFileUrl, Paper } from "../services/papersApi";
+import WorkspaceIcon from "../components/WorkspaceIcon";
+import { answerGenerationAvailable, askPaper, AskResult, getConversation, ResearchApiError, RetrievedPassage, SavedMessage, saveAnswerFeedback, searchPaper } from "../services/researchApi";
+import { evidenceText } from "../utils/evidenceOutcome";
 import { matchesAnswerRequest } from "../utils/answerRequest";
+import { deadlineFromRetry, remainingSeconds } from "../utils/groqCooldown";
 import CitedAnswer from "../components/CitedAnswer";
+import type { ConversationState } from "../components/WorkspaceLayout";
 
 function highlightedSource(text: string, excerpt: string) {
   const start = excerpt ? text.indexOf(excerpt) : -1;
@@ -21,18 +24,7 @@ type ResearchDraft = {
   messages?: SavedMessage[];
 };
 
-const groqRetryKey = "citewise-groq-retry-until-v2";
-const groqRevisionKey = "citewise-groq-key-revision";
 const pendingQuestionKey = (userId: string) => `citewise-pending-question:${userId}`;
-
-function savedGroqRetryUntil(): number {
-  try {
-    const deadline = Number(sessionStorage.getItem(groqRetryKey));
-    return Number.isFinite(deadline) && deadline > Date.now() ? deadline : 0;
-  } catch {
-    return 0;
-  }
-}
 
 function readResearchDraft(userId: string, paperId?: string): ResearchDraft | null {
   try {
@@ -53,7 +45,8 @@ function saveResearchDraft(userId: string, draft: ResearchDraft) {
 }
 
 export default function ResearchPage() {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
+  const { refreshConversations } = useOutletContext<ConversationState>();
   const [user, setUser] = useState<SignedInUser | null>(null);
   const [papers, setPapers] = useState<Paper[]>([]);
   const [paperId, setPaperId] = useState(params.get("paper") ?? "");
@@ -62,24 +55,25 @@ export default function ResearchPage() {
   const [answerResult, setAnswerResult] = useState<AskResult | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<SavedMessage[]>([]);
-  const [conversations, setConversations] = useState<Conversation[]>([]);
   const [canAnswer, setCanAnswer] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [expired, setExpired] = useState(false);
   const [error, setError] = useState("");
-  const [retryUntil, setRetryUntil] = useState(savedGroqRetryUntil);
-  const [retryRemaining, setRetryRemaining] = useState(() =>
-    Math.max(0, Math.ceil((savedGroqRetryUntil() - Date.now()) / 1000)));
+  const [retryUntil, setRetryUntil] = useState(0);
+  const [retryRemaining, setRetryRemaining] = useState(0);
   const [feedbackError, setFeedbackError] = useState("");
   const [feedbackBusy, setFeedbackBusy] = useState<string | null>(null);
   const [feedbackReasons, setFeedbackReasons] = useState<Record<string, "wrong_page" | "unsupported_answer" | "other">>({});
   const [attempt, setAttempt] = useState(0);
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const openedFromRouteRef = useRef<string | null>(null);
   const questionRef = useRef<HTMLTextAreaElement>(null);
+  const paperSelectRef = useRef<HTMLSelectElement>(null);
   const activeRequestRef = useRef<string | null>(null);
   const contextVersionRef = useRef(0);
+  const capabilityVersionRef = useRef(0);
 
   function invalidateRequest() {
     contextVersionRef.current += 1;
@@ -90,26 +84,32 @@ export default function ResearchPage() {
 
   useEffect(() => {
     let active = true;
-    Promise.all([getCurrentUser(), listPapers(0, 100, "ready"), answerGenerationAvailable(), listConversations()]).then(
-      ([currentUser, readyPapers, capability, savedConversations]) => {
+    try {
+      sessionStorage.removeItem("citewise-groq-key-revision");
+      sessionStorage.removeItem("citewise-groq-retry-until-v2");
+    } catch { /* Storage is optional. */ }
+    const refreshCapability = () => {
+      const version = ++capabilityVersionRef.current;
+      void answerGenerationAvailable().then((capability) => {
+        if (!active || version !== capabilityVersionRef.current) return;
+        setCanAnswer(capability.available);
+        const deadline = deadlineFromRetry(capability.retryAfterSeconds);
+        setRetryUntil(deadline);
+        setRetryRemaining(remainingSeconds(deadline));
+        if (!deadline) setError((current) => current.includes("Try again in ") ? "" : current);
+      }).catch(() => { /* Passage search remains available if capabilities cannot load. */ });
+    };
+    refreshCapability();
+    window.addEventListener("focus", refreshCapability);
+    Promise.all([getCurrentUser(), listPapers(0, 100, "ready")]).then(
+      ([currentUser, readyPapers]) => {
         if (!active) return;
         setUser(currentUser);
         setPapers(readyPapers);
-        setCanAnswer(capability.available);
-        try {
-          if (sessionStorage.getItem(groqRevisionKey) !== capability.keyRevision) {
-            sessionStorage.removeItem(groqRetryKey);
-            setRetryUntil(0);
-            setRetryRemaining(0);
-            setError("");
-          }
-          if (capability.keyRevision) sessionStorage.setItem(groqRevisionKey, capability.keyRevision);
-        } catch { /* Storage is optional. */ }
-        setConversations(savedConversations);
         const previousSelection = readResearchDraft(currentUser.id);
         const requestedPaper = params.get("paper");
         const selectedPaper = [requestedPaper, previousSelection?.paperId].find((id) =>
-          id && readyPapers.some((paper) => paper.id === id)) ?? readyPapers[0]?.id ?? "";
+          id && readyPapers.some((paper) => paper.id === id)) ?? "";
         const draft = readResearchDraft(currentUser.id, selectedPaper)
           ?? (previousSelection?.paperId === selectedPaper ? previousSelection : null);
         setPaperId(selectedPaper);
@@ -132,7 +132,7 @@ export default function ResearchPage() {
         setLoading(false);
       },
     );
-    return () => { active = false; };
+    return () => { active = false; window.removeEventListener("focus", refreshCapability); };
   }, [attempt]);
 
   useEffect(() => {
@@ -154,12 +154,26 @@ export default function ResearchPage() {
 
   useEffect(() => {
     if (!retryUntil) return;
-    try { sessionStorage.setItem(groqRetryKey, String(retryUntil)); } catch { /* Storage is optional. */ }
-    const update = () => setRetryRemaining(Math.max(0, Math.ceil((retryUntil - Date.now()) / 1000)));
+    const update = () => setRetryRemaining(remainingSeconds(retryUntil));
     update();
     const timer = window.setInterval(update, 1000);
     return () => window.clearInterval(timer);
   }, [retryUntil]);
+
+  useEffect(() => {
+    if (loading) return;
+    const targetId = params.get("conversation");
+    if (!targetId) {
+      if (openedFromRouteRef.current) {
+        setConversationId(null); setMessages([]); setAnswerResult(null); setResult(null);
+      }
+      openedFromRouteRef.current = null;
+      return;
+    }
+    if (targetId === openedFromRouteRef.current) return;
+    openedFromRouteRef.current = targetId;
+    void openSaved(targetId);
+  }, [loading, params]);
 
   function selectPaper(nextPaperId: string) {
     if (nextPaperId === paperId) return;
@@ -199,20 +213,26 @@ export default function ResearchPage() {
           activeRequestRef.current, contextVersionRef.current)) {
           throw new Error("The answer did not match this question. Please try again.");
         }
+        capabilityVersionRef.current += 1;
+        setRetryUntil(0);
+        setRetryRemaining(0);
         setAnswerResult(answer);
         setConversationId(answer.conversation_id);
+        if (answer.conversation_id) {
+          openedFromRouteRef.current = answer.conversation_id;
+          setParams({ conversation: answer.conversation_id }, { replace: true });
+        }
         setMessages((current) => [...current, {
           id: answer.message_id ?? crypto.randomUUID(), question: askedQuestion, status: answer.status,
           answer: answer.answer, sources: answer.sources, external_sources: answer.external_sources,
           assessment: answer.assessment, created_at: new Date().toISOString(),
         }]);
-        void listConversations().then((items) => {
-          if (contextVersionRef.current === contextVersion) setConversations(items);
-        }).catch(() => {});
+        void refreshConversations().catch(() => {});
       } else {
         const passages = await searchPaper(selectedPaperId, askedQuestion);
         if (activeRequestRef.current !== requestId || contextVersionRef.current !== contextVersion) return;
         setResult({ paperId: selectedPaperId, passages });
+        setQuestion("");
       }
     } catch (caught) {
       if (activeRequestRef.current !== requestId || contextVersionRef.current !== contextVersion) return;
@@ -222,7 +242,7 @@ export default function ResearchPage() {
         setExpired(true);
       }
       if (caught instanceof ResearchApiError && caught.status === 429 && caught.retryAfterSeconds) {
-        setRetryUntil((current) => Math.max(current, Date.now() + caught.retryAfterSeconds! * 1000));
+        setRetryUntil((current) => Math.max(current, deadlineFromRetry(caught.retryAfterSeconds)));
       }
       setError(caught instanceof Error ? caught.message : "Research could not finish.");
     } finally {
@@ -245,10 +265,18 @@ export default function ResearchPage() {
       const latest = saved.messages.at(-1);
       if (latest) {
         if (!papers.some((paper) => paper.id === saved.paper_id)) {
-          setError("This conversation's paper is no longer available.");
-          return;
+          const detail = await getPaper(saved.paper_id).catch(() => null);
+          if (contextVersionRef.current !== contextVersion) return;
+          if (!detail || detail.paper.status !== "ready") {
+            setError("This conversation's paper is no longer available.");
+            return;
+          }
+          setPapers((items) => [...items, detail.paper]);
         }
-        selectPaper(saved.paper_id);
+        if (saved.paper_id !== paperId) {
+          if (user && paperId) saveResearchDraft(user.id, { paperId, result, answerResult, conversationId, messages });
+          setPaperId(saved.paper_id);
+        }
         setConversationId(saved.id);
         setMessages(saved.messages);
         setQuestion("");
@@ -258,28 +286,10 @@ export default function ResearchPage() {
       }
     } catch (caught) {
       if (contextVersionRef.current !== contextVersion) return;
+      openedFromRouteRef.current = null;
       setError(caught instanceof Error ? caught.message : "Saved answer could not be opened.");
     } finally {
       if (contextVersionRef.current === contextVersion) setBusy(false);
-    }
-  }
-
-  async function removeSaved(conversationId: string) {
-    if (busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      await deleteConversation(conversationId);
-      setConversations((items) => items.filter((item) => item.id !== conversationId));
-      if (answerResult?.conversation_id === conversationId) {
-        setAnswerResult(null);
-        setConversationId(null);
-        setMessages([]);
-      }
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Saved answer could not be deleted.");
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -304,9 +314,8 @@ export default function ResearchPage() {
   return <>
     <main className="paper-main research-main">
       <header className="research-header">
-        <div><p className="label">Research workspace</p><h1>Ask your paper</h1>
+        <div><h1>Ask your paper</h1>
           <p className="research-intro">Get a concise answer, then open its supporting passage when you need to verify it.</p></div>
-        <Link className="research-library-link" to="/papers">View library <span aria-hidden="true">↗</span></Link>
       </header>
       <div className="research-grid">
         <div className="research-content">
@@ -318,8 +327,7 @@ export default function ResearchPage() {
             {feedbackError && <p className="form-error" role="alert">{feedbackError}</p>}
             <div className="research-message-list">{messages.map((message) => <article className="research-message" key={message.id}>
               <div className="research-message-question"><span>You</span><p>{message.question}</p></div>
-              <div className="research-message-answer"><span>CiteWise</span>
-                <strong className={`evidence-status evidence-status-${message.status}`}>{evidenceLabel(message.status)}</strong>
+              <div className="research-message-answer">
                 <p><CitedAnswer text={evidenceText(message.status, message.answer)} sources={message.sources} externalSources={message.external_sources} sourcePrefix={`source-${message.id}`} detailsId={`sources-${message.id}`} /></p>
                 {message.sources.length > 0 && <details className="answer-sources" id={`sources-${message.id}`}>
                   <summary><span className="sources-closed-label">Show</span><span className="sources-open-label">Hide</span> supporting {message.sources.length === 1 ? "passage" : "passages"}</summary>
@@ -331,10 +339,9 @@ export default function ResearchPage() {
                 </details>}
                 {!!message.external_sources?.length && <div className="external-sources"><strong>External sources</strong><ul>{message.external_sources.map((source) => <li key={source.id}><a href={source.url} target="_blank" rel="noreferrer">[{source.id}] {source.title} ↗</a>{source.published_date && <small> · Search-reported date: {source.published_date}</small>}{source.excerpt && <details><summary>View source excerpt</summary><p>{source.excerpt}</p></details>}</li>)}</ul></div>}
                 <div className="answer-feedback">
-                  <span>Was this answer helpful?</span>
                   <div className="answer-feedback-actions">
-                    <button type="button" disabled={feedbackBusy === message.id} aria-pressed={message.feedback?.rating === "helpful"} onClick={() => void rateAnswer(message, "helpful")}>Helpful</button>
-                    <button type="button" disabled={feedbackBusy === message.id} aria-pressed={message.feedback?.rating === "incorrect"} onClick={() => setFeedbackReasons((current) => ({ ...current, [message.id]: current[message.id] ?? "unsupported_answer" }))}>Incorrect</button>
+                    <button type="button" title="Helpful" aria-label="Helpful" disabled={feedbackBusy === message.id} aria-pressed={message.feedback?.rating === "helpful"} onClick={() => void rateAnswer(message, "helpful")}><WorkspaceIcon name="thumbUp" size={16} /></button>
+                    <button type="button" title="Incorrect" aria-label="Incorrect" disabled={feedbackBusy === message.id} aria-pressed={message.feedback?.rating === "incorrect"} onClick={() => setFeedbackReasons((current) => ({ ...current, [message.id]: current[message.id] ?? "unsupported_answer" }))}><WorkspaceIcon name="thumbDown" size={16} /></button>
                   </div>
                   {feedbackReasons[message.id] && <div className="answer-feedback-reason"><label htmlFor={`reason-${message.id}`}>What was wrong?</label>
                     <select id={`reason-${message.id}`} value={feedbackReasons[message.id]} onChange={(event) => setFeedbackReasons((current) => ({ ...current, [message.id]: event.target.value as "wrong_page" | "unsupported_answer" | "other" }))}>
@@ -351,7 +358,7 @@ export default function ResearchPage() {
           </div>}
           {busy && !pendingQuestion && <p className="research-progress" role="status">Searching your paper…</p>}
           {answerResult && messages.length === 0 && <section className="research-results research-answer-card" aria-live="polite">
-            <div className="research-result-heading"><span className="research-step">02</span><div><p className="label">From your paper</p><h2>{evidenceLabel(answerResult.status)}</h2></div></div>
+            <div className="research-result-heading"><span className="research-step">02</span><div><p className="label">From your paper</p><h2>Answer</h2></div></div>
             <p className="research-answer"><CitedAnswer text={evidenceText(answerResult.status, answerResult.answer)} sources={answerResult.sources} externalSources={answerResult.external_sources} sourcePrefix="fallback-source" detailsId="fallback-sources" /></p>
             {answerResult.sources.length > 0 && <details className="answer-sources" id="fallback-sources">
               <summary><span className="sources-closed-label">Show</span><span className="sources-open-label">Hide</span> supporting {answerResult.sources.length === 1 ? "passage" : "passages"}</summary>
@@ -373,54 +380,33 @@ export default function ResearchPage() {
             </article>)}
           </section>}
           </div>
-          {papers.length === 0 ? <div className="paper-empty-state">
-            <h2>No ready papers yet</h2><p>Upload a PDF to start asking questions about it.</p>
-            <Link className="primary-button" to="/papers">Open library</Link>
-          </div> : <form className="research-form research-composer" aria-label="Ask your paper" onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void submit(canAnswer ? "ask" : "search"); }}>
+          <form className="research-form research-composer" aria-label="Ask your paper" onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void submit(canAnswer ? "ask" : "search"); }}>
             {error && <p className="form-error" role="alert">{error}</p>}
             {!error && retryRemaining > 0 && <p className="form-error" role="status">Answer generation is rate limited. Try again in {Math.ceil(retryRemaining / 60)} min.</p>}
-            <div className="research-composer-top"><label htmlFor="research-paper">Paper</label>
-              <select id="research-paper" value={paperId} disabled={busy} onChange={(event) => selectPaper(event.target.value)}>
+            <div className="research-paper-tools">
+              <select ref={paperSelectRef} aria-label="Select Library PDF" value={paperId} disabled={busy} onChange={(event) => { openedFromRouteRef.current = null; setParams(event.target.value ? { paper: event.target.value } : {}, { replace: true }); selectPaper(event.target.value); }}>
+                <option value="">Select a PDF from Library</option>
                 {papers.map((paper) => <option key={paper.id} value={paper.id}>{paper.filename}</option>)}
               </select>
-              {conversationId && <button className="research-new-conversation" type="button" disabled={busy} onClick={() => {
-                invalidateRequest();
+              <button type="button" disabled={busy || !paperId || !question.trim()} onClick={() => void submit("search")}><WorkspaceIcon name="search" size={16} />Find passages</button>
+              <button type="button" disabled={busy || !paperId} onClick={() => {
+                invalidateRequest(); openedFromRouteRef.current = null; setParams({ paper: paperId }, { replace: true });
                 setConversationId(null); setMessages([]); setQuestion(""); setAnswerResult(null); setResult(null);
-              }}>New conversation</button>}
+              }}>New conversation</button>
             </div>
-            <div className="research-question-heading"><label htmlFor="research-question">Your question</label>
-              <button type="button" disabled={busy || !(messages.at(-1)?.question ?? conversations.find((item) => item.paper_id === paperId)?.messages.at(-1)?.question)}
-                onClick={() => { setQuestion(messages.at(-1)?.question ?? conversations.find((item) => item.paper_id === paperId)?.messages.at(-1)?.question ?? ""); setResult(null); setAnswerResult(null); }}>
-                ↶ Previous question
-              </button></div>
-            <textarea id="research-question" ref={questionRef} value={question} onChange={(event) => { setQuestion(event.target.value); setResult(null); setAnswerResult(null); }}
-              onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                if (question.trim() && !busy && (!canAnswer || retryRemaining === 0)) void submit(canAnswer ? "ask" : "search");
-              } }} maxLength={1000} required rows={2} aria-keyshortcuts="Enter" placeholder="Ask a question about this paper…" />
-            <div className="research-actions">
-              <span className="research-composer-hint">Enter to send · Shift+Enter for a new line</span>
-              {canAnswer && <button className="secondary-button" type="button" disabled={busy} onClick={(event) => {
-                if (event.currentTarget.form?.reportValidity()) void submit("search");
-              }}>Find passages only</button>}
-              <button className="primary-button" type="submit" disabled={busy || !question.trim() || (canAnswer && retryRemaining > 0)}>{busy ? "Working…" : retryRemaining > 0 ? `Try again in ${Math.ceil(retryRemaining / 60)} min` : canAnswer ? conversationId ? "Send follow-up" : "Generate answer" : "Find passages"}</button>
+            <div className="research-composer-row">
+              <button className="research-attach-button" type="button" title="Choose a Library PDF" aria-label="Choose a Library PDF" disabled={busy} onClick={() => { paperSelectRef.current?.focus(); try { paperSelectRef.current?.showPicker?.(); } catch { /* Keyboard focus remains on the selector. */ } }}><WorkspaceIcon name="plus" size={19} /></button>
+              <textarea id="research-question" ref={questionRef} value={question} onChange={(event) => { setQuestion(event.target.value); setResult(null); setAnswerResult(null); }}
+                onKeyDown={(event) => { if (event.key === "ArrowUp" && !question && messages.at(-1)?.question) {
+                  event.preventDefault(); setQuestion(messages.at(-1)!.question); return;
+                } if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  if (paperId && question.trim() && !busy && (!canAnswer || retryRemaining === 0)) void submit(canAnswer ? "ask" : "search");
+                } }} maxLength={1000} required rows={1} aria-label="Your question" aria-keyshortcuts="Enter ArrowUp" placeholder={paperId ? "Ask a question about this paper…" : "Select a Library PDF to ask a question…"} />
+              <button className="research-send-button" type="submit" title={canAnswer ? "Send question" : "Find passages"} aria-label={canAnswer ? "Send question" : "Find passages"} disabled={busy || !paperId || !question.trim() || (canAnswer && retryRemaining > 0)}><WorkspaceIcon name="arrowUp" size={19} /></button>
             </div>
-            {!canAnswer && <p className="research-form-note">Answer generation is unavailable. You can still find passages in your paper.</p>}
-          </form>}
+          </form>
         </div>
-        <aside className="research-history" aria-label="Saved questions">
-          <div className="research-history-heading"><div><p className="label">Your workspace</p><h2>Saved questions</h2></div><span>{conversations.length}</span></div>
-          {conversations.length === 0 ? <p className="research-history-empty">Your generated answers will appear here so you can revisit their sources.</p> :
-            <ul>{conversations.map((conversation) => <li key={conversation.id}>
-              <button type="button" className={answerResult?.conversation_id === conversation.id ? "selected" : ""} disabled={busy} onClick={() => void openSaved(conversation.id)}>
-                <strong>{conversation.messages.at(-1)?.question ?? "Saved question"}</strong>
-                <small>{papers.find((paper) => paper.id === conversation.paper_id)?.filename ?? "Paper unavailable"}</small>
-              </button>
-              <button className="research-history-delete" type="button" disabled={busy}
-                aria-label={`Delete saved question: ${conversation.messages.at(-1)?.question ?? "Saved question"}`}
-                onClick={() => void removeSaved(conversation.id)}>Delete</button>
-            </li>)}</ul>}
-        </aside>
       </div>
     </main>
   </>;
