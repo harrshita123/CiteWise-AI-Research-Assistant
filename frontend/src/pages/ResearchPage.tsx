@@ -386,7 +386,6 @@ export default function ResearchPage() {
                 <option value="">Select a PDF from Library</option>
                 {papers.map((paper) => <option key={paper.id} value={paper.id}>{paper.filename}</option>)}
               </select>
-              <button type="button" disabled={busy || !paperId || !question.trim()} onClick={() => void submit("search")}><WorkspaceIcon name="search" size={16} />Find passages</button>
               <button type="button" disabled={busy || !paperId} onClick={() => {
                 invalidateRequest(); openedFromRouteRef.current = null; setParams({ paper: paperId }, { replace: true });
                 setConversationId(null); setMessages([]); setQuestion(""); setAnswerResult(null); setResult(null);
