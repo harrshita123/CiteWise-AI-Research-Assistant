@@ -117,11 +117,8 @@ export default function ResearchPage() {
           setQuestion(sessionStorage.getItem(pendingQuestionKey(currentUser.id)) ?? "");
           sessionStorage.removeItem(pendingQuestionKey(currentUser.id));
         } catch { setQuestion(""); }
-        if (draft) {
+        if (draft && !params.get("conversation")) {
           setResult(draft.result?.paperId === selectedPaper ? draft.result : null);
-          setAnswerResult(draft.answerResult?.paper_id === selectedPaper ? draft.answerResult : null);
-          setConversationId(draft.conversationId ?? null);
-          setMessages(draft.messages ?? []);
         }
         setLoading(false);
       },
@@ -166,12 +163,16 @@ export default function ResearchPage() {
     if (!targetId) {
       if (openedFromRouteRef.current) {
         setConversationId(null); setMessages([]); setAnswerResult(null); setResult(null);
+        setQuestion(""); setError("");
       }
       openedFromRouteRef.current = null;
       return;
     }
     if (targetId === openedFromRouteRef.current) return;
     openedFromRouteRef.current = targetId;
+    invalidateRequest();
+    setConversationId(null); setMessages([]); setAnswerResult(null); setResult(null);
+    setQuestion(""); setError("");
     void openSaved(targetId);
   }, [loading, params]);
 
@@ -183,9 +184,9 @@ export default function ResearchPage() {
     setPaperId(nextPaperId);
     setQuestion("");
     setResult(draft?.result?.paperId === nextPaperId ? draft.result : null);
-    setAnswerResult(draft?.answerResult?.paper_id === nextPaperId ? draft.answerResult : null);
-    setConversationId(draft?.conversationId ?? null);
-    setMessages(draft?.messages ?? []);
+    setAnswerResult(null);
+    setConversationId(null);
+    setMessages([]);
     setError("");
   }
 
@@ -255,7 +256,6 @@ export default function ResearchPage() {
   }
 
   async function openSaved(conversationId: string) {
-    if (activeRequestRef.current) return;
     const contextVersion = ++contextVersionRef.current;
     setBusy(true);
     setError("");
@@ -263,30 +263,28 @@ export default function ResearchPage() {
       const saved = await getConversation(conversationId);
       if (contextVersionRef.current !== contextVersion) return;
       const latest = saved.messages.at(-1);
-      if (latest) {
-        if (!papers.some((paper) => paper.id === saved.paper_id)) {
-          const detail = await getPaper(saved.paper_id).catch(() => null);
-          if (contextVersionRef.current !== contextVersion) return;
-          if (!detail || detail.paper.status !== "ready") {
-            setError("This conversation's paper is no longer available.");
-            return;
-          }
-          setPapers((items) => [...items, detail.paper]);
+      if (!papers.some((paper) => paper.id === saved.paper_id)) {
+        const detail = await getPaper(saved.paper_id).catch(() => null);
+        if (contextVersionRef.current !== contextVersion) return;
+        if (!detail || detail.paper.status !== "ready") {
+          setError("This conversation's paper is no longer available.");
+          return;
         }
-        if (saved.paper_id !== paperId) {
-          if (user && paperId) saveResearchDraft(user.id, { paperId, result, answerResult, conversationId, messages });
-          setPaperId(saved.paper_id);
-        }
-        setConversationId(saved.id);
-        setMessages(saved.messages);
-        setQuestion("");
-        setResult(null);
-        setAnswerResult({ paper_id: saved.paper_id, conversation_id: saved.id, message_id: latest.id,
-          status: latest.status, answer: latest.answer, sources: latest.sources });
+        setPapers((items) => [...items, detail.paper]);
       }
+      if (saved.paper_id !== paperId) {
+        if (user && paperId) saveResearchDraft(user.id, { paperId, result, answerResult, conversationId, messages });
+        setPaperId(saved.paper_id);
+      }
+      setConversationId(saved.id);
+      setMessages(saved.messages);
+      setQuestion("");
+      setResult(null);
+      setAnswerResult(latest ? { paper_id: saved.paper_id, conversation_id: saved.id, message_id: latest.id,
+        status: latest.status, answer: latest.answer, sources: latest.sources } : null);
     } catch (caught) {
       if (contextVersionRef.current !== contextVersion) return;
-      openedFromRouteRef.current = null;
+      setConversationId(null); setMessages([]); setAnswerResult(null); setResult(null); setQuestion("");
       setError(caught instanceof Error ? caught.message : "Saved answer could not be opened.");
     } finally {
       if (contextVersionRef.current === contextVersion) setBusy(false);

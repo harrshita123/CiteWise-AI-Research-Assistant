@@ -1836,6 +1836,31 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(self.client.delete(f"/api/v1/research/conversations/{conversation_id}").status_code, 204)
         self.assertEqual(self.client.get(f"/api/v1/research/conversations/{conversation_id}").status_code, 404)
 
+    def test_conversation_ids_load_follow_ups_and_reject_missing_or_other_paper(self):
+        self.client.app.state.answer_provider = Answers(GeneratedAnswer("Alpha result.", ["c0-hash-a"]))
+        payload = {"paper_id": "paper-1", "question": "Alpha?"}
+        first = self.client.post("/api/v1/research/ask", json=payload).json()
+        second = self.client.post("/api/v1/research/ask", json={**payload, "question": "Beta?"}).json()
+        first_id, second_id = first["conversation_id"], second["conversation_id"]
+        self.assertNotEqual(first_id, second_id)
+        follow_up = self.client.post("/api/v1/research/ask", json={
+            **payload, "question": "And why?", "conversation_id": first_id,
+            "reply_to_message_id": first["message_id"],
+        })
+        self.assertEqual(follow_up.status_code, 200)
+        self.assertEqual(follow_up.json()["conversation_id"], first_id)
+        self.assertEqual([item["question"] for item in self.client.get(
+            f"/api/v1/research/conversations/{first_id}").json()["messages"]], ["Alpha?", "And why?"])
+        self.assertEqual(len(self.client.get(
+            f"/api/v1/research/conversations/{second_id}").json()["messages"]), 1)
+        self.assertEqual(self.client.get("/api/v1/research/conversations/invalid-id").status_code, 404)
+        self.assertEqual(self.client.post("/api/v1/research/ask", json={
+            **payload, "paper_id": "another-paper", "conversation_id": first_id,
+        }).status_code, 404)
+        self.assertEqual(self.client.delete(f"/api/v1/research/conversations/{first_id}").status_code, 204)
+        self.assertEqual(self.client.get(f"/api/v1/research/conversations/{first_id}").status_code, 404)
+        self.assertEqual(self.client.get(f"/api/v1/research/conversations/{second_id}").status_code, 200)
+
     def test_conversation_metadata_is_owner_scoped_and_shared_by_all_views(self):
         self.client.app.state.answer_provider = Answers(GeneratedAnswer("Alpha result.", ["c0-hash-a"]))
         first = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1", "question": "First topic?"}).json()
