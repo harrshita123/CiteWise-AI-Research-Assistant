@@ -1,5 +1,7 @@
 .site-header { height: 78px; max-width: 1180px; margin: auto; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; }
 .site-header nav { display: flex; align-items: center; gap: 28px; font-weight: 600; }
+.site-theme-toggle { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 8px; color: inherit; background: transparent; cursor: pointer; }
+.site-theme-toggle:hover { background: rgba(127, 127, 127, .14); }
 .site-header nav > a:not(.primary-button):hover { color: var(--blue); }
 
 .primary-button, .secondary-button { min-height: 48px; padding: 0 22px; border: 1px solid transparent; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; cursor: pointer; }

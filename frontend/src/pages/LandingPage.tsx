@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import Logo from "../components/Logo";
+import ThemeToggle from "../components/ThemeToggle";
 
 const steps = [
   ["01", "Upload your papers", "Add the PDFs you want CiteWise to work with."],
@@ -16,6 +17,7 @@ export default function LandingPage() {
           <a href="#how-it-works">How it works</a>
           <Link to="/login">Log in</Link>
           <Link className="primary-button small" to="/signup">Get started</Link>
+          <ThemeToggle className="site-theme-toggle" />
         </nav>
       </header>
 
@@ -36,7 +38,6 @@ export default function LandingPage() {
           <div className="answer-preview">
             <div className="preview-header">
               <span>Research workspace</span>
-              <strong>✓ Verified</strong>
             </div>
             <p className="question">What are the limitations of RAG?</p>
             <div className="answer">

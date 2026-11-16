@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { listPapers, paperFileUrl, Paper } from "../services/papersApi";
 import { AnswerFeedback, Conversation, getConversation, listConversations, saveAnswerFeedback, SavedMessage } from "../services/researchApi";
-import { evidenceLabel, evidenceText } from "../utils/evidenceOutcome";
+import { evidenceText } from "../utils/evidenceOutcome";
 import CitedAnswer from "../components/CitedAnswer";
 
 function passageText(text: string, excerpt: string) {
@@ -81,7 +81,6 @@ export default function AnswerCheckPage() {
           <div className="research-result-heading"><div><p className="label">{paperName(selected.paper_id)}</p><h2>Questions and evidence</h2></div></div>
           {selected.messages.map((message) => <article className="answer-check-item" key={message.id}>
             <h3>{message.question}</h3>
-            <strong className={`evidence-status evidence-status-${message.status}`}>{evidenceLabel(message.status)}</strong>
             <p className="answer-check-answer"><CitedAnswer text={evidenceText(message.status, message.answer)} sources={message.sources} externalSources={message.external_sources} sourcePrefix={`check-source-${message.id}`} detailsId={`check-sources-${message.id}`} /> {!message.external_sources?.length && message.sources.map((source, index) => <a href={`#check-source-${message.id}-${index}`} className="answer-citation" key={source.id} aria-label={`Show source ${index + 1}, page ${source.page_number}`} onClick={() => {
                 const details = document.getElementById(`check-sources-${message.id}`);
                 if (details instanceof HTMLDetailsElement) details.open = true;

@@ -43,6 +43,10 @@ export type AnswerFeedback = {
 export type Conversation = {
   id: string;
   paper_id: string;
+  paper_filename: string | null;
+  title: string;
+  pinned: boolean;
+  saved: boolean;
   created_at: string;
   updated_at: string;
   messages: SavedMessage[];
@@ -108,6 +112,12 @@ export function getConversation(id: string): Promise<Conversation> {
   return researchRequest<Conversation>(`/conversations/${encodeURIComponent(id)}`);
 }
 
+export function updateConversation(id: string, update: { title?: string; pinned?: boolean; saved?: boolean }): Promise<Conversation> {
+  return researchRequest<Conversation>(`/conversations/${encodeURIComponent(id)}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update),
+  });
+}
+
 export function deleteConversation(id: string): Promise<void> {
   return researchRequest<void>(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
@@ -120,7 +130,7 @@ export function saveAnswerFeedback(conversationId: string, messageId: string, fe
   });
 }
 
-export async function answerGenerationAvailable(): Promise<{ available: boolean; keyRevision: string | null }> {
-  const result = await researchRequest<{ answer_generation: boolean; key_revision: string | null }>("/capabilities");
-  return { available: result.answer_generation, keyRevision: result.key_revision };
+export async function answerGenerationAvailable(): Promise<{ available: boolean; retryAfterSeconds: number }> {
+  const result = await researchRequest<{ answer_generation: boolean; retry_after_seconds: number }>("/capabilities");
+  return { available: result.answer_generation, retryAfterSeconds: result.retry_after_seconds };
 }

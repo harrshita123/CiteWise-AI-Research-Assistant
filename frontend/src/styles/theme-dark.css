@@ -1,0 +1,268 @@
+/* Shared dark palette. This layer follows the existing page styles so the
+   application keeps its layout while all surfaces use one color system. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  color: #f5f5f5;
+  background: #212121;
+  --navy: #101010;
+  --blue: #9ba8ff;
+  --teal: #79c7c9;
+  --muted: #a3a3a3;
+  --line: #3a3a3a;
+  --dark-main: #212121;
+  --dark-sidebar: #171717;
+  --dark-header: #101010;
+  --dark-surface: #2b2b2b;
+  --dark-surface-raised: #323232;
+  --dark-hover: #383838;
+  --dark-selected: #333650;
+  --dark-text: #f5f5f5;
+  --dark-subtle: #a3a3a3;
+  --dark-border: #3a3a3a;
+  --dark-accent: #aeb7ff;
+  --dark-danger: #ff9ba7;
+}
+html[data-theme="dark"] {
+body, .workspace-shell, .workspace-page, .admin-page, .auth-page,
+.auth-panel, .hero, .evidence-statement { color: var(--dark-text); background: var(--dark-main); }
+input, textarea, select, button { color-scheme: dark; }
+input::placeholder, textarea::placeholder { color: #858585; }
+:is(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--dark-accent);
+  outline-offset: 2px;
+}
+
+/* Application shell and conversation navigation. */
+.workspace-sidebar { color: var(--dark-text); background: var(--dark-sidebar); }
+.workspace-sidebar-header { background: var(--dark-header); }
+.workspace-sidebar-brand, .workspace-sidebar-toggle,
+.workspace-sidebar-header .workspace-sidebar-search, .workspace-toggle,
+.workspace-profile strong, .workspace-sidebar-footer button,
+.workspace-conversation-navigation .research-history li strong,
+.workspace-conversation-navigation .research-history-folder-toggle { color: var(--dark-text); }
+.workspace-profile small, .workspace-conversation-navigation .research-history li small,
+.workspace-conversation-navigation .research-history-section h2,
+.workspace-nav-soon small { color: var(--dark-subtle); }
+.workspace-nav > a, .workspace-nav > a.workspace-nav-soon { color: #d6d6d6; }
+.workspace-nav > a:hover, .workspace-sidebar-footer button:hover,
+.workspace-toggle:hover, .workspace-conversation-navigation .research-history li:hover,
+.workspace-conversation-navigation .research-history-folder-toggle:hover,
+.workspace-conversation-navigation .research-history-menu-trigger:hover { color: var(--dark-text); background: var(--dark-hover); }
+.workspace-nav > a.active, .workspace-conversation-navigation .research-history li.selected {
+  color: var(--dark-accent); background: var(--dark-selected);
+}
+.workspace-sidebar-footer { border-color: var(--dark-border); }
+.workspace-conversation-navigation .research-history { color: var(--dark-text); background: transparent; }
+.workspace-conversation-navigation .research-history-rename input,
+.workspace-conversation-navigation .research-history-rename button {
+  color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface);
+}
+.workspace-sidebar-resize:hover, .sidebar-resizing .workspace-sidebar-resize { background: transparent; }
+.workspace-sidebar-resize:focus-visible { outline-color: #70aaff; }
+.workspace-mobile-toggle { color: var(--dark-text); background: var(--dark-sidebar); }
+
+/* Common cards, buttons, and form controls. */
+.home-stat, .home-card, .coming-card, .paper-upload, .paper-empty-state,
+.paper-list button, .paper-preview, .paper-chunk, .research-form,
+.research-results, .research-history, .research-composer, .research-message-answer,
+.research-transcript .research-message-answer, .answer-preview, .admin-header,
+.admin-table-wrap, .evaluation-notice, .evaluation-metric, .evaluation-card,
+.evaluation-case, .evaluation-empty, .evaluation-runs li button {
+  color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface); box-shadow: none;
+}
+.home-table-wrap, .paper-file-picker, .research-message-question,
+.workspace-page .research-message-question, .external-sources,
+.answer-check-answer, .question, .source mark {
+  color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface-raised);
+}
+.secondary-button, .paper-picker-action, .research-library-link,
+.research-form select, .research-form textarea, .field input,
+.evaluation-case input, .evaluation-case select, .evaluation-case textarea,
+.answer-feedback button, .answer-feedback select,
+.research-delete-dialog button, .workspace-page .research-history-rename button {
+  color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface-raised);
+}
+.primary-button, .home-upload-button, .answer-feedback-reason button,
+.workspace-page .research-history-rename button[type="submit"] {
+  color: #101325; border-color: var(--dark-accent); background: var(--dark-accent); box-shadow: none;
+}
+.primary-button:hover, .home-upload-button:hover,
+.answer-feedback-reason button:hover { color: #101325; background: #c4caff; }
+.secondary-button:hover, .paper-picker-action:hover,
+.paper-file-picker:hover, .paper-file-input:focus-visible + .paper-file-picker,
+.home-actions > a:hover, .paper-list button:hover,
+.evaluation-runs li button:hover, .evaluation-runs li button.active,
+.answer-feedback button:hover { color: var(--dark-text); border-color: #777c9b; background: var(--dark-hover); }
+:is(button, input, select, textarea):disabled { opacity: .55; cursor: not-allowed; }
+.paper-file-picker { border-style: dashed; }
+
+/* Page titles, body copy, metadata, and links. */
+.workspace-page, .workspace-page h1, .workspace-page h2, .workspace-page h3,
+.workspace-page h4, .auth-card h1, .admin-main h1, .hero h1,
+.evaluation-header h1, .evaluation-card-heading h2,
+.research-header h1, .research-welcome h2,
+.home-header h1, .home-card h2, .home-featured-paper h3,
+.home-stat strong, .home-actions strong, .coming-card h1,
+.paper-main h1, .research-message p, .research-answer,
+.answer-check-item > h3, .answer-check-detail .answer-sources > h4,
+.answer-check-detail .paper-chunk h4, .evaluation-result h3,
+.evaluation-pages strong, .admin-summary strong { color: var(--dark-text); }
+.workspace-page small, .workspace-page .label, .research-intro,
+.research-pending-status, .research-welcome, .research-composer-hint,
+.research-source-help, .research-form-note, .answer-check-note,
+.answer-check-empty, .paper-intro, .paper-upload p,
+.paper-empty-state p, .paper-preview > p:not(.label),
+.home-header p:last-child, .home-featured-paper p,
+.home-recent th, .home-processing > p, .home-empty,
+.home-actions small, .coming-card p, .evaluation-header p:last-child,
+.evaluation-help, .evaluation-result p, .evaluation-footnote,
+.evaluation-pages, .admin-summary, .auth-description, .auth-footer,
+.answer p, .source p, .source small, .hero-text, .steps p {
+  color: var(--dark-subtle);
+}
+.label, .home-eyebrow, .workspace-page .home-eyebrow,
+.research-header .label, .paper-chunk h3 span { color: var(--dark-accent); }
+.answer-citation, .paper-chunk a,
+.answer-check-detail .paper-chunk a, .auth-footer a,
+.home-recent td:last-child a, .home-card a, .open-paper,
+.research-library-link, .evaluation-case legend { color: var(--dark-accent); }
+.answer-citation:hover,
+.paper-chunk a:hover { color: #d1d5ff; }
+
+/* Research transcript, evidence, feedback, and composer. */
+.research-message, .research-message .answer-sources, .answer-feedback,
+.answer-check-item, .answer-check-detail .answer-sources,
+.research-history-heading, .evaluation-card-heading,
+.evaluation-result, .answer { border-color: var(--dark-border); }
+.research-message-question { background: #34354a; }
+.research-message-question > span { color: #c1c8ff; }
+.research-message-answer > span { color: #9ad3d1; }
+.research-results .paper-chunk, .answer-check-detail .paper-chunk,
+.research-transcript .research-message-answer { border-color: var(--dark-border); background: var(--dark-surface); }
+.research-results .paper-chunk { border-left-color: var(--dark-accent); }
+.answer-feedback > span, .answer-feedback-reason label,
+.research-message .answer-sources > h3, .answer-check-detail .paper-chunk p,
+.research-form label, .evaluation-case label { color: var(--dark-text); }
+.answer-feedback button[aria-pressed="true"], .paper-list button[aria-pressed="true"] {
+  color: var(--dark-accent); border-color: var(--dark-accent); background: var(--dark-selected);
+}
+.answer-feedback small, .form-message { color: #a5e2c5; }
+.paper-status, .role-badge, .home-status,
+.evaluation-outcome, .evaluation-card-heading > span {
+  color: var(--dark-accent); background: var(--dark-selected);
+}
+.paper-status.failed,
+.evaluation-outcome.miss { color: var(--dark-danger); background: #493039; }
+.paper-status.ready, .evaluation-outcome.hit { color: #a5e2c5; background: #244039; }
+.research-progress, .form-message, .home-error,
+.admin-error, .evaluation-error, .oauth-error {
+  color: #f5d28e; border-color: #665132; background: #3d3429;
+}
+.form-error, .research-history-error, .evaluation-remove,
+.paper-list .paper-list-delete, .research-conversation-menu .research-conversation-menu-delete {
+  color: var(--dark-danger);
+}
+
+/* Menus, dialogs, tables, and secondary pages. */
+.research-conversation-menu, .research-delete-dialog {
+  color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface-raised);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .35);
+}
+.research-conversation-menu button { color: var(--dark-text); background: transparent; }
+.research-conversation-menu button:hover, .research-conversation-menu button:focus-visible,
+.research-conversation-menu .research-conversation-menu-delete:hover { background: var(--dark-hover); }
+.research-delete-backdrop { background: rgba(0, 0, 0, .7); }
+.research-delete-dialog .research-delete-confirm { color: white; border-color: #ad4b5b; background: #ad4b5b; }
+.home-recent th, .admin-table th, .preview-header { color: var(--dark-subtle); background: var(--dark-surface-raised); }
+.home-recent td, .admin-table th, .admin-table td { color: var(--dark-text); border-color: var(--dark-border); }
+.home-recent tbody tr:hover { background: var(--dark-hover); }
+.home-actions > a { color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface-raised); }
+.home-action-icon, .home-stat-icon, .paper-upload-icon,
+.paper-empty-icon, .coming-icon, .research-step {
+  color: var(--dark-accent); background: var(--dark-selected);
+}
+.paper-list .paper-list-delete:hover { color: var(--dark-danger); border-color: #8d4c59; background: #493039; }
+.evaluation-metric > span, .evaluation-metric p,
+.evaluation-result p, .evaluation-runs li small { color: var(--dark-subtle); }
+.evaluation-metric strong, .evaluation-card-heading .label,
+.evaluation-result h3 { color: var(--dark-accent); }
+.evaluation-case, .evaluation-empty, .evaluation-runs li button { background: var(--dark-surface-raised); }
+.auth-intro, .research-flow, footer { color: var(--dark-text); background: var(--dark-header); }
+.auth-intro > div > p:last-child, .auth-intro blockquote,
+.friction, .research-flow .label { color: var(--dark-subtle); }
+.hero { background: var(--dark-main); }
+.site-header, .admin-header { background: var(--dark-header); border-color: var(--dark-border); }
+.question { border-left-color: var(--dark-accent); }
+.source mark { color: var(--dark-text); }
+.evidence-statement { background: var(--dark-surface); }
+
+/* Rules whose existing page selectors are more specific than the shared groups. */
+.workspace-page .home-main, .workspace-page .research-main,
+.workspace-page .workspace-library-main, .workspace-page .evaluation-main,
+.workspace-page .answer-check-main { background: var(--dark-main); }
+.workspace-conversation-navigation .research-history li > button:first-child,
+.workspace-conversation-navigation .research-history-menu-trigger { color: var(--dark-text); background: transparent; }
+.auth-card, .steps article, .steps article + article,
+.admin-summary, .paper-preview .paper-chunk, .paper-list .paper-list-view {
+  color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface);
+}
+.primary-button:hover:not(:disabled) { color: #101325; border-color: #c4caff; background: #c4caff; box-shadow: none; }
+.secondary-button:hover:not(:disabled) { color: var(--dark-text); border-color: #777c9b; background: var(--dark-hover); }
+.site-header .logo, .hero h1, .auth-card h1,
+.paper-main h1, .paper-library-heading h2, .admin-main h1,
+.workspace-page .research-header h1, .evaluation-header h1,
+.evaluation-card-heading h2 { color: var(--dark-text); }
+.workspace-page .research-message-question { border-color: var(--dark-border); background: #34354a; }
+.workspace-page .research-composer, .workspace-page .research-form,
+.workspace-page .research-results, .workspace-page .research-message-answer,
+.workspace-page .research-transcript .research-message-answer {
+  color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface);
+}
+.workspace-page .research-composer textarea { color: var(--dark-text); border: 0; background: transparent; }
+.workspace-page .research-paper-tools button { color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface-raised); }
+.workspace-page .research-paper-tools button:hover:not(:disabled) { background: var(--dark-hover); }
+.workspace-page .research-attach-button { color: var(--dark-text); }
+.workspace-page .research-attach-button:hover,
+.workspace-page .answer-feedback-actions button:hover { background: var(--dark-hover); }
+.workspace-page .research-send-button { color: #fff; background: #3478d4; }
+.workspace-page .research-history li:hover,
+.workspace-page .research-history-folder-toggle:hover { background: var(--dark-hover); }
+.workspace-page .research-history li.selected,
+.workspace-page .research-history li.selected:hover { background: var(--dark-selected); }
+.workspace-page .research-history li strong, .workspace-page .research-history-folder-toggle,
+.workspace-page .research-history-menu-trigger, .workspace-page .research-history-rename button { color: var(--dark-text); }
+.workspace-page .research-history li small,
+.workspace-page .research-history .research-history-section h2 { color: var(--dark-subtle); }
+.workspace-page .research-history-rename input,
+.workspace-page .research-history-rename button { border-color: var(--dark-border); background: var(--dark-surface-raised); }
+.workspace-page .research-history-rename button[type="submit"] { color: #101325; background: var(--dark-accent); }
+.workspace-page .research-history-folder-toggle { background: transparent; }
+.home-stat-icon.lilac, .home-stat-icon.blue, .home-stat-icon.teal,
+.home-actions .home-action-icon { color: var(--dark-accent); background: var(--dark-selected); }
+.auth-intro::after { border-color: var(--dark-border); box-shadow: none; }
+.research-answer, .research-results .research-top-passage {
+  color: var(--dark-text); border-color: var(--dark-accent); background: var(--dark-surface-raised); box-shadow: none;
+}
+.answer-sources summary {
+  color: var(--dark-accent); border-color: var(--dark-border); background: var(--dark-surface-raised);
+}
+.answer-sources summary:hover { border-color: var(--dark-accent); background: var(--dark-hover); }
+.source-highlight { color: #151515; background: #ffe29a; box-shadow: 0 0 0 2px #ffe29a; }
+.research-results .paper-chunk h3 span { color: #a5e2c5; background: #244039; }
+.research-history-heading > span, .admin-summary span,
+.role-badge.admin, .role-badge.user,
+.home-status-ready, .home-status-processing, .home-status-failed,
+.coming-badge { color: var(--dark-accent); background: var(--dark-selected); }
+.workspace-page .research-history-menu-trigger[aria-expanded="true"] {
+  color: var(--dark-text); background: var(--dark-hover);
+}
+.paper-library-heading { border-color: var(--dark-border); }
+.paper-preview .paper-chunk { border-left-color: var(--dark-accent); }
+.evaluation-case input, .evaluation-case select, .evaluation-case textarea,
+.research-form select, .research-form textarea, .field input {
+  color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface-raised);
+}
+.evaluation-runs li button:hover, .evaluation-runs li button.active {
+  color: var(--dark-text); border-color: var(--dark-accent); background: var(--dark-selected);
+}
+}
