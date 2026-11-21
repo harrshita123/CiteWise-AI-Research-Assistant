@@ -75,4 +75,4 @@ npm run build
 
 ## Current limits
 
-Upload processing runs within the request and uses an in-process lock; it is not a durable job queue. Scanned-only PDFs need OCR, which is not implemented. Multi-paper comparison, labeled answer-quality evaluation, and deployment are still in progress. Retrieval Hit@5 does not measure whether generated answers are correct.
+Upload processing runs within the request and uses an in-process lock; it is not a durable job queue. Scanned-only PDF. Multi-paper comparison, labeled answer-quality evaluation, and deployment are still in progress. Retrieval Hit@5 does not measure whether generated answers are correct.
