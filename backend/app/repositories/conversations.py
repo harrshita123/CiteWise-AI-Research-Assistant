@@ -51,6 +51,15 @@ class ConversationRepository:
         )
         return result.matched_count == 1
 
+    async def update_verified_message(self, owner_id: str, conversation_id: str, message_id: str,
+                                      fields: dict[str, Any]) -> bool:
+        result = await self.collection.update_one(
+            {"_id": conversation_id, "owner_id": owner_id,
+             "messages": {"$elemMatch": {"id": message_id, "verification_status": "unavailable"}}},
+            {"$set": {f"messages.$.{key}": value for key, value in fields.items()}},
+        )
+        return result.matched_count == 1
+
     async def list_for_user(self, owner_id: str) -> list[dict[str, Any]]:
         cursor = self.collection.find(
             {"owner_id": owner_id}, {"messages": {"$slice": -1}},

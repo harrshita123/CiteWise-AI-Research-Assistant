@@ -38,6 +38,20 @@ class VectorRepository:
                   for text, metadata in zip(result["documents"], result["metadatas"])]
         return sorted(chunks, key=lambda chunk: chunk.chunk_index)
 
+    def sample(self, owner_id: str, paper_id: str, chunk_count: int, limit: int = 16) -> list[ChunkResponse]:
+        """Return evenly spread chunks so recommendations are not based on page one only."""
+        if chunk_count <= 0:
+            return []
+        count = min(chunk_count, limit)
+        indices = sorted({round(index * (chunk_count - 1) / max(1, count - 1)) for index in range(count)})
+        result = self.collection.get(
+            ids=[f"{paper_id}:{index}" for index in indices], where=self.paper_filter(owner_id, paper_id),
+            include=["documents", "metadatas"],
+        )
+        return sorted((ChunkResponse(text=text, **metadata)
+                       for text, metadata in zip(result["documents"], result["metadatas"])),
+                      key=lambda chunk: chunk.chunk_index)
+
     @staticmethod
     def _terms(text: str) -> set[str]:
         stopwords = {"what", "which", "who", "where", "when", "how", "does", "did", "have",

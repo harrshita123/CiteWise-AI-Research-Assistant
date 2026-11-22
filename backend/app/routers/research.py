@@ -3,6 +3,7 @@ from typing import Literal
 from collections import Counter, OrderedDict
 from hashlib import sha256
 import logging
+import asyncio
 import ipaddress
 import unicodedata
 import hmac
@@ -31,6 +32,7 @@ from ..services.ingestion import IngestionService
 from ..services.evidence_coverage import CoveragePassage, coverage_report, missing_coverage, requested_coverage
 from ..services.research_subjects import requested_subjects, subject_spans
 from ..services.claim_verification import split_claims, review_claims, present_claims
+from ..services.question_recommendations import QuestionRecommendationService, RecommendedQuestion
 
 router = APIRouter(prefix="/api/v1/research", tags=["research"])
 _GROQ_COOLDOWN_COOKIE = "citewise_groq_cooldown"
@@ -73,6 +75,7 @@ def _rate_limit_headers(exc: AnswerRateLimitError, provider: AnswerProvider) -> 
 _assessment_cache: OrderedDict[tuple[GroqAnswerProvider, str], "EvidenceReview"] = OrderedDict()
 _assessment_cache_lock = Lock()
 _assessment_cache_limit = 128
+_verification_locks = [asyncio.Lock() for _ in range(64)]
 
 
 class SearchRequest(BaseModel):
@@ -184,6 +187,8 @@ class AskResponse(BaseModel):
     assessment: EvidenceReview | None = None
     claims: list[ClaimReviewResponse] = Field(default_factory=list)
     search_trace: SearchTrace = Field(default_factory=SearchTrace)
+    verification_status: Literal["verified", "unavailable"] = "verified"
+    retry_after_seconds: int = 0
 
 
 class AnswerFeedback(BaseModel):
@@ -204,6 +209,8 @@ class SavedMessage(BaseModel):
     search_trace: SearchTrace = Field(default_factory=SearchTrace)
     created_at: datetime
     feedback: AnswerFeedback | None = None
+    verification_status: Literal["verified", "unavailable"] = "verified"
+    retry_after_seconds: int = 0
 
 
 class ConversationResponse(BaseModel):
@@ -236,11 +243,77 @@ class ConversationUpdate(BaseModel):
     saved: bool | None = None
 
 
+class RecommendedQuestionResponse(BaseModel):
+    id: str
+    text: str
+    recommendation_type: str
+    page_number: int
+    chunk_index: int
+
+
+class RecommendationResponse(BaseModel):
+    paper_id: str
+    recommendations: list[RecommendedQuestionResponse]
+
+
+class AlternativeRecommendationRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+    conversation_id: str | None = Field(default=None, max_length=64)
+
+
+class FollowUpRecommendationRequest(BaseModel):
+    message_id: str = Field(min_length=1, max_length=64)
+
+
+def _recommendation_response(paper_id: str, items: list[RecommendedQuestion]) -> RecommendationResponse:
+    return RecommendationResponse(paper_id=paper_id, recommendations=[
+        RecommendedQuestionResponse(id=item.id, text=item.text, recommendation_type=item.recommendation_type,
+                                    page_number=item.source.page_number, chunk_index=item.source.chunk_index)
+        for item in items
+    ])
+
+
+def _recommendation_service(request: Request) -> QuestionRecommendationService:
+    ingestion: IngestionService = request.app.state.ingestion_service
+    return QuestionRecommendationService(ingestion.vectors, ingestion.embeddings.embed,
+                                         getattr(request.app.state, "answer_provider", None))
+
+
+def _log_recommendation_run(mode: str, paper_id: str, service: QuestionRecommendationService,
+                            recommendations: list[RecommendedQuestion], started_at: float) -> None:
+    logging.getLogger(__name__).info(
+        "research_recommendations mode=%s paper_id=%s count=%s provider_used=%s latency_ms=%s",
+        mode, paper_id, len(recommendations), service.provider_used,
+        round((time.monotonic() - started_at) * 1000),
+    )
+
+
+async def _ready_recommendation_paper(request: Request, user: UserResponse, paper_id: str) -> dict:
+    papers: PaperRepository = request.app.state.paper_repository
+    paper = await papers.find(user.id, paper_id)
+    if paper is None:
+        raise HTTPException(404, "Paper not found.")
+    if paper.get("status") != "ready":
+        raise HTTPException(409, "Wait until this paper is ready.")
+    return paper
+
+
+async def _generate_recommendations(function, *args):
+    try:
+        return await run_in_threadpool(function, *args)
+    except AnswerRateLimitError as exc:
+        headers = {"Retry-After": exc.retry_after} if exc.retry_after else None
+        raise HTTPException(429, "Suggestions are temporarily rate limited.", headers=headers) from None
+    except Exception:
+        raise HTTPException(503, "Suggestions are temporarily unavailable.") from None
+
+
 async def _verified_sections(provider: AnswerProvider, question: str, pdf_text: str,
                              external_text: str, pdf_ids: list[str], external_ids: list[str],
                              pdf_sources: dict[str, AnswerSource],
                              external_sources: dict[str, ExternalEvidence],
-                             request_id: str | None = None, debug_claims: bool = False
+                             request_id: str | None = None, debug_claims: bool = False,
+                             raise_unavailable: bool = False
                              ) -> tuple[str, str, list[ClaimReviewResponse]]:
     claims = split_claims(pdf_text, external_text)
     if not claims or len(claims) > 20:
@@ -270,6 +343,8 @@ async def _verified_sections(provider: AnswerProvider, question: str, pdf_text: 
     except AnswerRateLimitError:
         raise
     except Exception:
+        if raise_unavailable:
+            raise
         return "", "", []
     verified_dates = {}
     for item in external_sources.values():
@@ -468,6 +543,115 @@ async def save_answer_feedback(conversation_id: str, message_id: str, feedback: 
     if not await repository.set_feedback(user.id, conversation_id, message_id, feedback.model_dump()):
         raise HTTPException(404, "Answer not found.")
     return feedback
+
+
+@router.get("/papers/{paper_id}/recommendations", response_model=RecommendationResponse)
+async def starter_recommendations(paper_id: str, request: Request,
+                                  user: UserResponse = Depends(get_current_user)):
+    paper = await _ready_recommendation_paper(request, user, paper_id)
+    service = _recommendation_service(request)
+    started_at = time.monotonic()
+    recommendations = await _generate_recommendations(service.starter, user.id, paper_id, paper)
+    _log_recommendation_run("starter", paper_id, service, recommendations, started_at)
+    return _recommendation_response(paper_id, recommendations)
+
+
+@router.post("/papers/{paper_id}/recommendations/alternatives", response_model=RecommendationResponse)
+async def alternative_recommendations(paper_id: str, payload: AlternativeRecommendationRequest, request: Request,
+                                      user: UserResponse = Depends(get_current_user)):
+    paper = await _ready_recommendation_paper(request, user, paper_id)
+    previous = []
+    if payload.conversation_id:
+        conversations: ConversationRepository = request.app.state.conversation_repository
+        conversation = await conversations.find(user.id, payload.conversation_id)
+        if conversation is None or conversation.get("paper_id") != paper_id:
+            raise HTTPException(404, "Conversation not found.")
+        previous = [item.get("question", "") for item in conversation.get("messages", [])]
+    service = _recommendation_service(request)
+    started_at = time.monotonic()
+    recommendations = await _generate_recommendations(service.alternatives, user.id, paper_id,
+                                               payload.question.strip(), paper, previous)
+    _log_recommendation_run("alternative", paper_id, service, recommendations, started_at)
+    return _recommendation_response(paper_id, recommendations)
+
+
+@router.post("/conversations/{conversation_id}/recommendations", response_model=RecommendationResponse)
+async def follow_up_recommendations(conversation_id: str, payload: FollowUpRecommendationRequest, request: Request,
+                                    user: UserResponse = Depends(get_current_user)):
+    conversations: ConversationRepository = request.app.state.conversation_repository
+    conversation = await conversations.find(user.id, conversation_id)
+    if conversation is None:
+        raise HTTPException(404, "Conversation not found.")
+    paper_id = conversation["paper_id"]
+    await _ready_recommendation_paper(request, user, paper_id)
+    message = next((item for item in conversation.get("messages", []) if item.get("id") == payload.message_id), None)
+    if message is None:
+        raise HTTPException(404, "Answer not found.")
+    supported = any(claim.get("section") == "pdf" and claim.get("status") == "supported"
+                    and claim.get("supporting") for claim in message.get("claims", []))
+    if (message.get("status") != "answered" and not supported) or not message.get("answer"):
+        return _recommendation_response(paper_id, [])
+    previous = [item.get("question", "") for item in conversation.get("messages", [])]
+    service = _recommendation_service(request)
+    started_at = time.monotonic()
+    recommendations = await _generate_recommendations(service.follow_up, user.id, paper_id,
+                                               message["question"], message["answer"],
+                                               message.get("sources", []), previous)
+    _log_recommendation_run("follow_up", paper_id, service, recommendations, started_at)
+    return _recommendation_response(paper_id, recommendations)
+
+
+@router.post("/conversations/{conversation_id}/messages/{message_id}/verify", response_model=SavedMessage)
+async def retry_message_verification(conversation_id: str, message_id: str, request: Request,
+                                     user: UserResponse = Depends(get_current_user)):
+    repository: ConversationRepository = request.app.state.conversation_repository
+    document = await repository.find(user.id, conversation_id)
+    if document is None:
+        raise HTTPException(404, "Conversation not found.")
+    await _ready_recommendation_paper(request, user, document["paper_id"])
+    provider = getattr(request.app.state, "answer_provider", None)
+    if provider is None or (hasattr(provider, "available") and not provider.available()):
+        raise HTTPException(503, "Verification is temporarily unavailable.")
+    if isinstance(provider, GroqAnswerProvider):
+        cooldown = _cooldown_seconds(request, provider)
+        if cooldown:
+            raise HTTPException(429, "Verification is temporarily rate limited.", headers={"Retry-After": str(cooldown)})
+    lock = _verification_locks[int(sha256(f"{user.id}:{conversation_id}:{message_id}".encode()).hexdigest()[:8], 16) % len(_verification_locks)]
+    async with lock:
+        document = await repository.find(user.id, conversation_id)
+        if document is None:
+            raise HTTPException(404, "Conversation not found.")
+        message = next((item for item in document.get("messages", []) if item.get("id") == message_id), None)
+        if message is None:
+            raise HTTPException(404, "Answer not found.")
+        if message.get("verification_status", "verified") != "unavailable":
+            return SavedMessage(**message)
+        sources = {item["id"]: AnswerSource(**item) for item in message.get("sources", [])}
+        if not sources or not message.get("answer"):
+            raise HTTPException(409, "The answer cannot be verified without its evidence.")
+        try:
+            checked, _, claims = await _verified_sections(provider,
+                message.get("resolved_question") or message["question"], message["answer"], "",
+                list(sources), [], sources, {}, raise_unavailable=True)
+        except AnswerRateLimitError as exc:
+            raise HTTPException(429, "Verification is temporarily rate limited.",
+                                headers=_rate_limit_headers(exc, provider)) from None
+        except Exception:
+            raise HTTPException(503, "Verification is temporarily unavailable.") from None
+        if not claims:
+            raise HTTPException(503, "Verification is temporarily unavailable.")
+        used = {quote.source_id for item in claims for quote in item.supporting + item.opposing}
+        status = ("contradictory_evidence" if any(item.status == "contradicted" for item in claims)
+                  else "insufficient_evidence" if not any(item.status == "supported" for item in claims)
+                  else "partially_supported" if any(item.status != "supported" for item in claims)
+                  or (message.get("assessment") or {}).get("level") == "partial" else "answered")
+        fields = {"answer": checked or "The generated claims could not be verified.", "status": status,
+                  "sources": [source.model_dump(mode="json") for key, source in sources.items() if key in used],
+                  "claims": [item.model_dump(mode="json") for item in claims],
+                  "verification_status": "verified", "retry_after_seconds": 0}
+        if not await repository.update_verified_message(user.id, conversation_id, message_id, fields):
+            raise HTTPException(409, "This answer changed. Reload the conversation.")
+        return SavedMessage(**{**message, **fields})
 
 
 def _evidence_excerpt(question: str, text: str) -> str:
@@ -1052,7 +1236,8 @@ async def ask_paper(
             raise HTTPException(404, "Previous message not found in this conversation.")
 
     async def save_result(result: AskResponse) -> AskResponse:
-        response.delete_cookie(_GROQ_COOLDOWN_COOKIE, path="/api/v1/research")
+        if result.verification_status == "verified":
+            response.delete_cookie(_GROQ_COOLDOWN_COOKIE, path="/api/v1/research")
         result.question = payload.question.strip()
         result.request_id = payload.request_id
         for key, value in groq_counts.items():
@@ -1066,6 +1251,7 @@ async def ask_paper(
             answer=result.answer, sources=result.sources, external_sources=result.external_sources,
             assessment=result.assessment, created_at=datetime.now(timezone.utc),
             claims=result.claims, search_trace=result.search_trace,
+            verification_status=result.verification_status, retry_after_seconds=result.retry_after_seconds,
         ).model_dump(mode="json")
         if payload.conversation_id:
             if not await conversations.append(user.id, payload.conversation_id, payload.paper_id, message):
@@ -1312,7 +1498,7 @@ async def ask_paper(
                 external_text, pdf_ids, external_ids, sources, external_by_id,
                 request_id=payload.request_id, debug_claims=_local_claim_debug(request))
         except AnswerRateLimitError as exc:
-            raise HTTPException(429, "Claim verification is temporarily rate limited.",
+            raise HTTPException(429, "Answer generated, but claim verification is temporarily unavailable. The answer was not shown.",
                                 headers=_rate_limit_headers(exc, provider)) from None
         if not claim_reviews:
             return await save_result(unverified_external_answer())
@@ -1389,10 +1575,18 @@ async def ask_paper(
         checked_pdf, _, claim_reviews = await _verified_sections(
             provider, question_for_retrieval, answer.strip(), "", cited, [],
             {item: sources[item] for item in cited}, {}, request_id=payload.request_id,
-            debug_claims=_local_claim_debug(request))
+            debug_claims=_local_claim_debug(request), raise_unavailable=True)
     except AnswerRateLimitError as exc:
-        raise HTTPException(429, "Claim verification is temporarily rate limited.",
-                            headers=_rate_limit_headers(exc, provider)) from None
+        headers = _rate_limit_headers(exc, provider) or {}
+        if "Set-Cookie" in headers:
+            response.headers.append("Set-Cookie", headers["Set-Cookie"])
+        return await save_result(AskResponse(paper_id=payload.paper_id, status="insufficient_evidence",
+            answer=answer.strip(), sources=[sources[item] for item in cited], assessment=assessment,
+            verification_status="unavailable", retry_after_seconds=int(exc.retry_after or 0)))
+    except Exception:
+        return await save_result(AskResponse(paper_id=payload.paper_id, status="insufficient_evidence",
+            answer=answer.strip(), sources=[sources[item] for item in cited], assessment=assessment,
+            verification_status="unavailable"))
     if not claim_reviews:
         return await save_result(AskResponse(paper_id=payload.paper_id,
             status="insufficient_evidence", answer="The generated claims could not be verified.",
