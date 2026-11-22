@@ -81,12 +81,13 @@ export default function AnswerCheckPage() {
           <div className="research-result-heading"><div><p className="label">{paperName(selected.paper_id)}</p><h2>Questions and evidence</h2></div></div>
           {selected.messages.map((message) => <article className="answer-check-item" key={message.id}>
             <h3>{message.question}</h3>
+            {message.verification_status === "unavailable" && <p role="status">Not verified — verification temporarily unavailable.</p>}
             <p className="answer-check-answer"><CitedAnswer text={evidenceText(message.status, message.answer)} sources={message.sources} externalSources={message.external_sources} sourcePrefix={`check-source-${message.id}`} detailsId={`check-sources-${message.id}`} /> {!message.external_sources?.length && message.sources.map((source, index) => <a href={`#check-source-${message.id}-${index}`} className="answer-citation" key={source.id} aria-label={`Show source ${index + 1}, page ${source.page_number}`} onClick={() => {
                 const details = document.getElementById(`check-sources-${message.id}`);
                 if (details instanceof HTMLDetailsElement) details.open = true;
               }}>[{index + 1}]</a>)}</p>
             {message.sources.length > 0 && <details className="answer-sources" id={`check-sources-${message.id}`}>
-              <summary><span className="sources-closed-label">Show</span><span className="sources-open-label">Hide</span> supporting {message.sources.length === 1 ? "passage" : "passages"}</summary>
+              <summary><span className="sources-closed-label">Show</span><span className="sources-open-label">Hide</span> {message.verification_status === "unavailable" ? "retrieved" : "supporting"} {message.sources.length === 1 ? "passage" : "passages"}</summary>
               <p className="research-source-help">Compare the highlighted text with the answer and original PDF.</p>
               {message.sources.map((source, index) => <div className="paper-chunk" key={source.id} id={`check-source-${message.id}-${index}`}>
                 <h4>Page {source.page_number}</h4><p>{passageText(source.text, source.highlight_text)}</p>

@@ -167,6 +167,16 @@
 .research-composer textarea { min-width: 0; min-height: 34px; max-height: 180px; flex: 1; padding: 7px 2px; border: 0; background: transparent; box-shadow: none; font-size: 13px; resize: none; overflow-y: auto; }
 .research-composer textarea:focus-visible { border: 0; outline: 0; }
 .research-composer:focus-within { border-color: #8794dc; }
+.question-recommendations { margin: 0 0 14px; padding: 12px 14px; border: 1px solid #e2e7f0; border-radius: 12px; background: #fafbfe; }
+.question-recommendations > div:first-child { display: flex; align-items: center; gap: 9px; }
+.question-recommendations h2 { margin: 0; color: #293958; font-size: .82rem; }
+.question-recommendations span { color: #6a7890; font-size: .77rem; }
+.question-recommendation-retry, .research-retry-icon { margin-top: 8px; width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 1px solid #d6def1; border-radius: 8px; color: #3149ad; background: #fff; cursor: pointer; }
+.question-recommendation-retry:disabled, .research-retry-icon:disabled { opacity: .5; cursor: default; }
+.question-recommendation-retry:focus-visible, .research-retry-icon:focus-visible { outline: 2px solid #5264d6; outline-offset: 2px; }
+.question-recommendation-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+.question-recommendation-list button { padding: 7px 10px; border: 1px solid #d6def1; border-radius: 999px; color: #3149ad; background: #fff; font: inherit; font-size: .8rem; text-align: left; cursor: pointer; }
+.question-recommendation-list button:hover, .question-recommendation-list button:focus-visible { border-color: #7182d8; background: #f0f3ff; }
 .research-grid > .research-history { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .research-grid > .research-history ul { flex: 1; min-height: 0; max-height: none; overflow-y: auto; }
 @media (max-width: 850px) { .answer-check-grid { grid-template-columns: 1fr; } .answer-check-history ul { max-height: 240px; } }

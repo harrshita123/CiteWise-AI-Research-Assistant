@@ -1,8 +1,9 @@
-type IconName = "home" | "library" | "search" | "compare" | "shield" | "upload" | "arrow" | "arrowUp" | "plus" | "thumbUp" | "thumbDown" | "chevron" | "panel" | "file" | "clock" | "check" | "warning" | "logout" | "user" | "menu" | "close" | "more" | "edit" | "pin" | "trash" | "sun" | "moon";
+type IconName = "home" | "library" | "search" | "compare" | "shield" | "upload" | "arrow" | "arrowUp" | "plus" | "thumbUp" | "thumbDown" | "chevron" | "panel" | "file" | "clock" | "check" | "warning" | "logout" | "user" | "menu" | "close" | "more" | "edit" | "pin" | "trash" | "sun" | "moon" | "refresh";
 
 export default function WorkspaceIcon({ name, size = 22 }: { name: IconName; size?: number }) {
   const shared = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true as const };
   const paths: Record<IconName, React.ReactNode> = {
+    refresh: <><path d="M20 11a8 8 0 0 0-14-5L4 8m0-4v4h4M4 13a8 8 0 0 0 14 5l2-2m0 4v-4h-4" /></>,
     home: <><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V10Z" /><path d="M9 21v-7h6v7" /></>,
     library: <><rect x="4" y="2.5" width="16" height="19" rx="2" /><path d="M8 7h8M8 11h8M8 15h5" /></>,
     search: <><circle cx="10.8" cy="10.8" r="7" /><path d="m16 16 5 5" /></>,

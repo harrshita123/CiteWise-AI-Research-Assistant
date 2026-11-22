@@ -9,6 +9,7 @@ export type RetrievedPassage = {
 export type AnswerSource = RetrievedPassage & { id: string; highlight_text: string };
 export type ExternalSource = { id: string; title: string; url: string; published_date: string | null; excerpt?: string | null };
 export type EvidenceReview = { level: "sufficient" | "partial" | "none"; chunk_ids: string[]; missing_information: string };
+export type ClaimReview = { section: "pdf" | "external"; status: string; supporting: { source_id: string; quote: string }[] };
 
 export type AskResult = {
   paper_id: string;
@@ -21,6 +22,9 @@ export type AskResult = {
   sources: AnswerSource[];
   external_sources?: ExternalSource[];
   assessment?: EvidenceReview | null;
+  claims?: ClaimReview[];
+  verification_status?: "verified" | "unavailable";
+  retry_after_seconds?: number;
 };
 
 export type SavedMessage = {
@@ -31,13 +35,24 @@ export type SavedMessage = {
   sources: AnswerSource[];
   external_sources?: ExternalSource[];
   assessment?: EvidenceReview | null;
+  claims?: ClaimReview[];
   created_at: string;
   feedback?: AnswerFeedback | null;
+  verification_status?: "verified" | "unavailable";
+  retry_after_seconds?: number;
 };
 
 export type AnswerFeedback = {
   rating: "helpful" | "incorrect";
   reason: "wrong_page" | "unsupported_answer" | "other" | null;
+};
+
+export type RecommendedQuestion = {
+  id: string;
+  text: string;
+  recommendation_type: "paper" | "methodology" | "findings" | "limitations" | string;
+  page_number: number;
+  chunk_index: number;
 };
 
 export type Conversation = {
@@ -104,6 +119,31 @@ export function askPaper(paperId: string, question: string, conversationId?: str
   });
 }
 
+export async function starterQuestions(paperId: string): Promise<RecommendedQuestion[]> {
+  const result = await researchRequest<{ recommendations: RecommendedQuestion[] }>(
+    `/papers/${encodeURIComponent(paperId)}/recommendations`,
+  );
+  return result.recommendations;
+}
+
+export async function alternativeQuestions(paperId: string, question: string, conversationId?: string): Promise<RecommendedQuestion[]> {
+  const result = await researchRequest<{ recommendations: RecommendedQuestion[] }>(
+    `/papers/${encodeURIComponent(paperId)}/recommendations/alternatives`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, conversation_id: conversationId }),
+    },
+  );
+  return result.recommendations;
+}
+
+export async function followUpQuestions(conversationId: string, messageId: string): Promise<RecommendedQuestion[]> {
+  const result = await researchRequest<{ recommendations: RecommendedQuestion[] }>(
+    `/conversations/${encodeURIComponent(conversationId)}/recommendations`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message_id: messageId }) },
+  );
+  return result.recommendations;
+}
+
 export function listConversations(): Promise<Conversation[]> {
   return researchRequest<Conversation[]>("/conversations");
 }
@@ -128,6 +168,10 @@ export function saveAnswerFeedback(conversationId: string, messageId: string, fe
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(feedback),
   });
+}
+
+export function retryVerification(conversationId: string, messageId: string): Promise<SavedMessage> {
+  return researchRequest<SavedMessage>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/verify`, { method: "POST" });
 }
 
 export async function answerGenerationAvailable(): Promise<{ available: boolean; retryAfterSeconds: number }> {
