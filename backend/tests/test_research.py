@@ -170,6 +170,16 @@ class Conversations:
                 return True
         return False
 
+    async def update_verified_message(self, owner_id, conversation_id, message_id, fields):
+        item = await self.find(owner_id, conversation_id)
+        if not item:
+            return False
+        for message in item["messages"]:
+            if message["id"] == message_id and message.get("verification_status") == "unavailable":
+                message.update(fields)
+                return True
+        return False
+
 
 class ResearchTests(unittest.TestCase):
     def setUp(self):
@@ -1812,6 +1822,38 @@ class ResearchTests(unittest.TestCase):
         self.assertNotIn("retry-after", response.headers)
         response = self.client.post("/api/v1/research/ask", json={**payload, "paper_id": "foreign"})
         self.assertEqual(response.status_code, 404)
+
+    def test_rate_limited_claim_verification_retries_without_regenerating(self):
+        class LimitedVerifier(Answers):
+            verification_calls = 0
+            generation_calls = 0
+
+            def generate(self, question, evidence):
+                self.generation_calls += 1
+                return super().generate(question, evidence)
+
+            def verify_claims(self, question, claims, evidence):
+                self.verification_calls += 1
+                if self.verification_calls == 1:
+                    raise AnswerRateLimitError("60")
+                return super().verify_claims(question, claims, evidence)
+
+        provider = LimitedVerifier(
+            GeneratedAnswer("Alpha result. [c0-hash-a]", ["c0-hash-a"]))
+        self.client.app.state.answer_provider = provider
+        response = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "Alpha?"})
+        self.assertEqual(response.status_code, 200)
+        pending = response.json()
+        self.assertEqual(pending["verification_status"], "unavailable")
+        self.assertEqual(pending["retry_after_seconds"], 60)
+        self.assertIn("Alpha result", pending["answer"])
+        retry = self.client.post(f'/api/v1/research/conversations/{pending["conversation_id"]}/messages/{pending["message_id"]}/verify')
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(retry.json()["verification_status"], "verified")
+        self.assertEqual(provider.generation_calls, 1)
+        self.assertEqual(provider.verification_calls, 2)
+        self.assertEqual(len(self.client.app.state.conversation_repository.items[pending["conversation_id"]]["messages"]), 1)
 
     def test_conversation_history_is_owned_and_paper_bound(self):
         self.client.app.state.answer_provider = Answers(GeneratedAnswer("Alpha result.", ["c0-hash-a"]))

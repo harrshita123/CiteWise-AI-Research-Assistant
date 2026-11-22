@@ -293,7 +293,8 @@ class GroqAnswerTests(unittest.TestCase):
     def test_rate_limit_exposes_only_retry_delay(self):
         response = Mock(status_code=429, headers={"retry-after": "12"})
         with patch("app.providers.groq_answers.requests.post", return_value=response) as post, \
-                patch("app.providers.groq_answers.time.sleep") as sleep:
+                patch("app.providers.groq_answers.time.sleep") as sleep, \
+                patch("app.providers.groq_answers.random.uniform", return_value=0):
             with self.assertRaises(AnswerRateLimitError) as caught:
                 GroqAnswerProvider("test-key", "openai/gpt-oss-120b", 120).generate(
                     "Question?", [Evidence("c1", "Evidence.")])
@@ -386,11 +387,12 @@ class GroqAnswerTests(unittest.TestCase):
     def test_retry_timeout_is_bounded(self):
         provider = GroqAnswerProvider("test-key", "model", 10)
         with patch("app.providers.groq_answers.requests.post", side_effect=requests.Timeout) as post, \
-                patch("app.providers.groq_answers.time.sleep") as sleep:
+                patch("app.providers.groq_answers.time.sleep") as sleep, \
+                patch("app.providers.groq_answers.random.uniform", return_value=0.25):
             with self.assertRaises(requests.Timeout):
                 provider._complete("test", {}, "system", "user")
         self.assertEqual(post.call_count, 3)
-        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.25, 2.25])
 
     def test_long_retry_after_fails_without_premature_retry(self):
         provider = GroqAnswerProvider("test-key", "model", 10)
