@@ -169,7 +169,6 @@ export default function WorkspaceLayout({ user }: { user: SignedInUser }) {
           <NavLink to="/home" title="Dashboard" aria-label="Dashboard" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="home" /><span className="workspace-nav-label">Dashboard</span></NavLink>
           <NavLink to="/papers" title="Library" aria-label="Library" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="library" /><span className="workspace-nav-label">Library</span></NavLink>
           <NavLink to="/research" title="Research" aria-label="Research" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="search" /><span className="workspace-nav-label">Research</span></NavLink>
-          <NavLink to="/compare" title="Compare" aria-label="Compare" className={({ isActive }) => `workspace-nav-soon${isActive ? " active" : ""}`}><WorkspaceIcon name="compare" /><span className="workspace-nav-label">Compare</span><small>Coming soon</small></NavLink>
           {user.role === "admin" && <NavLink to="/admin" title="Admin" aria-label="Admin" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="user" /><span className="workspace-nav-label">Admin</span></NavLink>}
           {user.role === "admin" && <NavLink to="/admin/evaluation" title="Retrieval evaluation" aria-label="Retrieval evaluation" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="shield" /><span className="workspace-nav-label">Retrieval evaluation</span></NavLink>}
         </nav>

@@ -6,7 +6,6 @@ import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import PapersPage from "./pages/PapersPage";
 import HomePage from "./pages/HomePage";
-import ComingSoonPage from "./pages/ComingSoonPage";
 import ResearchPage from "./pages/ResearchPage";
 import EvaluationPage from "./pages/EvaluationPage";
 import WorkspaceLayout from "./components/WorkspaceLayout";
@@ -83,7 +82,7 @@ export default function App() {
       <Route element={<WorkspaceRoute />}>
         <Route path="/home" element={<HomePage />} />
         <Route path="/research" element={<ResearchPage />} />
-        <Route path="/compare" element={<ComingSoonPage area="compare" />} />
+        <Route path="/compare" element={<Navigate to="/home" replace />} />
         <Route path="/evaluation" element={<Navigate to="/research" replace />} />
         <Route path="/admin/evaluation" element={<EvaluationPage />} />
         <Route path="/admin" element={<AdminPage />} />
