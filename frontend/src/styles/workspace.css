@@ -283,20 +283,3 @@
 @media (prefers-reduced-motion: reduce) {
   .workspace-shell, .workspace-sidebar { transition-duration: .01ms; }
 }
-.citewise-demo-banner {
-  position: sticky;
-  top: 0;
-  z-index: 4;
-  height: 36px;
-  padding: 8px 18px;
-  text-align: center;
-  color: #153e70;
-  background: #e5f1ff;
-  border-bottom: 1px solid #c3d9f5;
-  font-size: .87rem;
-}
-@container (min-width: 921px) {
-  @media (min-width: 1051px) and (min-height: 701px) {
-    .workspace-page .citewise-demo-banner + .research-main { height: calc(100dvh - 36px); }
-  }
-}

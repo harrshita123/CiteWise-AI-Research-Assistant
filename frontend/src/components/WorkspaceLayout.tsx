@@ -200,9 +200,6 @@ export default function WorkspaceLayout({ user, demoMode }: { user: SignedInUser
           event.preventDefault();
         }} />}
       <div className="workspace-page">
-        {demoMode && <div className="citewise-demo-banner" role="note">
-          <strong>Demo Mode</strong> · Sample AI responses
-        </div>}
         <Outlet context={{ conversations, setConversations: updateConversations, refreshConversations, demoMode } satisfies ConversationState} />
       </div>
     </div>
