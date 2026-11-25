@@ -30,6 +30,13 @@ class DemoConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Settings(**config, jwt_secret="d" * 40)
 
+    def test_demo_defaults_to_single_chunk_embeddings_and_allows_an_override(self):
+        with patch.dict(os.environ, {}, clear=True):
+            settings = {"_env_file": None, "citewise_demo_mode": True, "citewise_demo_jwt_secret": "d" * 40}
+            self.assertEqual(Settings(**settings).embedding_batch_size, 1)
+            self.assertEqual(Settings(**settings, embedding_batch_size=4).embedding_batch_size, 4)
+            self.assertEqual(Settings.model_fields["embedding_batch_size"].default, 32)
+
     def test_every_sample_answer_is_supported_on_the_cited_pdf_page(self):
         with pymupdf.open(SAMPLE_PDF) as pdf:
             self.assertEqual(pdf.metadata["title"], SAMPLE_TITLE)

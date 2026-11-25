@@ -76,6 +76,8 @@ class Settings(BaseSettings):
             if len(secret) < 32 or secret == self.jwt_secret:
                 raise ValueError("Demo mode requires a separate session secret of at least 32 characters.")
             self.session_cookie_name = "citewise_demo_session"
+            if "embedding_batch_size" not in self.model_fields_set:
+                self.embedding_batch_size = 1
             return self
         if not (self.mongodb_uri and self.jwt_secret and self.google_client_id):
             raise ValueError("The MongoDB URI, Google client ID, and session secret are required.")
