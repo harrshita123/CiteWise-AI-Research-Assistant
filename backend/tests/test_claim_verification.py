@@ -2,7 +2,7 @@ import unittest
 from datetime import date
 
 from app.providers.answers import ClaimAssessment, ClaimQuote, Evidence
-from app.services.claim_verification import Claim, _numbers_supported, present_claims, review_claims, split_claims
+from app.services.claim_verification import Claim, ReviewedClaim, _numbers_supported, present_claims, review_claims, split_claims
 
 
 class ClaimVerificationTests(unittest.TestCase):
@@ -27,6 +27,88 @@ class ClaimVerificationTests(unittest.TestCase):
             [("c1", "The study included 412 students")])
         self.assertEqual(result.status, "supported")
         self.assertIn("[c1]", present_claims([result], "pdf"))
+
+    def test_partial_presentation_preserves_supported_prose_and_deduplicates_evidence(self):
+        supported = self.check("The study enrolled 412 students [c1].", "supported",
+            [("c1", "The study included 412 students")])
+        pdf_quote = ClaimQuote("c2", self.sources[1].text)
+        web_quote = ClaimQuote("ext1", self.sources[2].text)
+        partial = [
+            ReviewedClaim(Claim(f"claim-{index}", "The study proved the effect.", section, [quote.source_id]),
+                          "partially_supported", [quote], [], "", "attribution_only")
+            for index, (section, quote) in enumerate(
+                [("pdf", pdf_quote), ("pdf", pdf_quote), ("external", web_quote)], 2)
+        ]
+        pdf = present_claims([supported, *partial], "pdf")
+        external = present_claims([supported, *partial], "external")
+        self.assertIn("The study enrolled 412 students. [c1]", pdf)
+        self.assertEqual(pdf.count(pdf_quote.quote), 1)
+        self.assertEqual(pdf.count("[c2]"), 1)
+        self.assertEqual(pdf.count("Independent confirmation was not established."), 1)
+        self.assertNotIn("proved the effect", pdf)
+        self.assertNotIn("[ext1]", pdf)
+        self.assertIn("[ext1]", external)
+        self.assertNotIn("[c2]", external)
+
+    def test_quality_checks_on_independent_evidence_fixtures(self):
+        cases = [
+            ("pdf direct", "The core contained quartz", "The core contained quartz.", {}, "supported"),
+            ("web direct", "Wetland restoration increased bird density", "Wetland restoration increased bird density.", {}, "supported"),
+            ("topic only", "Rainfall increased last spring", "Rainfall increased last spring.",
+             {"question_fit": "irrelevant"}, "unsupported"),
+            ("official but missing outcome", "The registry recorded the enrollment date", "The registry recorded the enrollment date.",
+             {"evidence_use": "insufficient"}, "unsupported"),
+            ("promotion", "The charger saves 18% of electricity", "Our charger saves 18% of electricity.",
+             {"evidence_use": "attribution_only"}, "partially_supported"),
+            ("preprint replication", "The audit independently replicated the classification result",
+             "The preprint reports a classification result from its original audit.",
+             {"evidence_use": "attribution_only"}, "partially_supported"),
+            ("universal estimate", "The vacancy rate is 12% everywhere",
+             "The vacancy rate was 12% in the sampled district.", {"scope_preserved": False}, "partially_supported"),
+            ("time and sample lost", "The dropout rate is 8%", "The dropout rate was 8% in the 2018 cohort.",
+             {"scope_preserved": False}, "partially_supported"),
+            ("missing unit", "The dropout rate is 8%", "The dropout count was 8 in the cohort.", {}, "unsupported"),
+            ("synthetic as observed", "The glacier lost 12 meters", "The simulated glacier lost 12 meters.", {}, "partially_supported"),
+            ("synthetic in context", "The simulated glacier lost 12 meters", "The simulated glacier lost 12 meters.", {}, "supported"),
+            ("question partly addressed", "The archive lists the start date", "The archive lists the start date.",
+             {"question_fit": "partial"}, "partially_supported"),
+        ]
+        for name, text, passage, assessment, expected in cases:
+            with self.subTest(name=name):
+                pdf = name in {"pdf direct", "synthetic as observed", "synthetic in context"}
+                source = Evidence("c1" if pdf else "ext1", passage, {"origin": "pdf" if pdf else "web"})
+                claim = Claim("claim-1", text, "pdf" if pdf else "external", [source.id])
+                proposed = ClaimAssessment(claim.id, "supported", [ClaimQuote(source.id, passage)], [], **assessment)
+                reviewed = review_claims([claim], [proposed], [source])[0]
+                self.assertEqual(reviewed.status, expected)
+                if expected == "unsupported":
+                    self.assertEqual(reviewed.supporting, [])
+                    self.assertNotIn(f"[{source.id}]", present_claims([reviewed], claim.section))
+                if assessment.get("evidence_use") == "attribution_only":
+                    self.assertIn("Independent confirmation was not established", present_claims([reviewed], claim.section))
+
+    def test_direct_refutation_can_be_retained_without_support_for_the_claim(self):
+        claim = Claim("claim-1", "The program increased recycling participation", "external", ["ext1"])
+        source = Evidence("ext1", "The program did not increase recycling participation.", {"origin": "web"})
+        proposed = ClaimAssessment(claim.id, "contradicted", [], [ClaimQuote(source.id, source.text)])
+        reviewed = review_claims([claim], [proposed], [source])[0]
+        self.assertEqual(reviewed.status, "contradicted")
+        self.assertIn("[ext1]", present_claims([reviewed], "external"))
+
+    def test_web_citation_cannot_splice_away_a_qualification(self):
+        source = Evidence("ext1", "The vendor claimed, without independent confirmation, that energy use fell.", {"origin": "web"})
+        claim = Claim("claim-1", "The vendor demonstrated that energy use fell", "external", ["ext1"])
+        proposed = ClaimAssessment(claim.id, "supported", [ClaimQuote(source.id, "The vendor claimed ... that energy use fell")], [])
+        reviewed = review_claims([claim], [proposed], [source])[0]
+        self.assertEqual(reviewed.reason_code, "quote_mismatch")
+
+    def test_negative_values_are_not_converted_to_positive(self):
+        source = Evidence("c-temp", "The temperature changed by −5 degrees.")
+        quote = ClaimQuote(source.id, source.text)
+        for value, expected in (("−5", "supported"), ("5", "unsupported")):
+            claim = split_claims(f"The temperature changed by {value} degrees [c-temp].", "")[0]
+            reviewed = review_claims([claim], [ClaimAssessment(claim.id, "supported", [quote], [])], [source])[0]
+            self.assertEqual(reviewed.status, expected)
 
     def test_measured_difference_does_not_establish_significance(self):
         source = Evidence("c-rate", "Trial Meridian observed 18% versus 12% improvement. "
@@ -301,7 +383,7 @@ class ClaimVerificationTests(unittest.TestCase):
         result = self.check("The survey proves webcams cause privacy concerns [ext1].",
             "partially_supported", [("ext1", "59% of students expressed privacy concerns")], section="external")
         self.assertEqual(result.status, "partially_supported")
-        self.assertIn("only partly", present_claims([result], "external"))
+        self.assertIn("supports only part", present_claims([result], "external"))
         invented = self.check("The survey found 95% expressed privacy concerns [ext1].",
             "partially_supported", [("ext1", "59% of students expressed privacy concerns")],
             section="external")
@@ -318,7 +400,7 @@ class ClaimVerificationTests(unittest.TestCase):
         self.assertIn("Study B used matched courses with 780 students", shown)
         self.assertIn("[c1]", shown)
         self.assertNotIn("superior", shown)
-        self.assertIn("remaining detail could not be verified", shown)
+        self.assertIn("supports only part", shown)
 
     def test_d_two_external_sources_conflict(self):
         result = self.check("Webcams increase privacy concerns [ext1].", "contradicted",

@@ -10,8 +10,11 @@ import re
 import time
 from typing import Callable, Iterable
 
+from pymongo.errors import PyMongoError
+from requests import RequestException
+
 from ..paper_models import ChunkResponse
-from ..providers.answers import Evidence
+from ..providers.answers import AnswerRateLimitError, Evidence
 from ..repositories.vectors import VectorRepository
 
 
@@ -26,7 +29,7 @@ class RecommendedQuestion:
 class QuestionRecommendationService:
     """Build small, verifiable suggestions from chunks already stored in ChromaDB.
 
-    Groq is optional: a provider can supply more specific candidates through
+    OpenRouter is optional: a provider can supply more specific candidates through
     ``recommend_questions``. Every candidate is still checked against PDF
     retrieval before it reaches the client.
     """
@@ -36,12 +39,14 @@ class QuestionRecommendationService:
     _generation_lock = Lock()
     _cache_limit = 128
     _cache_seconds = 60 * 60
+    _fallback_cache_seconds = 60
 
     def __init__(self, vectors: VectorRepository, embed: Callable[[list[str]], list[list[float]]], provider: object | None):
         self.vectors = vectors
         self.embed = embed
         self.provider = provider
         self.provider_used = False
+        self.used_local_fallback = False
 
     @staticmethod
     def _normalise(value: str) -> str:
@@ -104,12 +109,56 @@ class QuestionRecommendationService:
     def _identifier(paper_id: str, kind: str, question: str) -> str:
         return "rq-" + sha256(f"{paper_id}\0{kind}\0{question.casefold()}".encode()).hexdigest()[:16]
 
+    @staticmethod
+    def _local_candidates(samples: list[ChunkResponse]):
+        patterns = (
+            (r"\b(?:objective|aim|purpose)\b.{0,32}\b(?:is|was|to)\b|\bwe (?:present|propose|introduce|provide)\b",
+             "What is the paper’s objective?"),
+            (r"\b(?:methodology|method|study design)\b.{0,45}\b(?:used|included|involved|consisted)\b|\bwe (?:used|trained|evaluated|measured|validated)\b",
+             "What methods did the authors use?"),
+            (r"\b(?:results?|findings?)\b.{0,36}\b(?:show\w*|report\w*|indicat\w*)\b|"
+             r"\bwe (?:found|observed|show)\b|\bdemonstrating\b.{0,100}\boutperforming\b",
+             "What findings do the authors report?"),
+            (r"\b(?:limitation|caveat|drawback)\b.{0,24}\b(?:is|was|includes?)\b",
+             "What limitations does the paper identify?"),
+        )
+        for source in samples:
+            text = " ".join(source.text.split())
+            if (re.search(r"\b(?:references|bibliography|acknowledg\w*|reporting summary)\b",
+                          source.section or "", re.I)
+                    or len(re.findall(r"\b[A-Z][a-z-]+,\s+[A-Z]\.", text)) >= 2):
+                continue
+            for sentence in re.split(r"(?<=[.!?])\s+", text):
+                if len(sentence.split()) < 6 or len(sentence) > 1200:
+                    continue
+                questions = [question for pattern, question in patterns if re.search(pattern, sentence, re.I)]
+                if questions:
+                    yield from ((question, source) for question in questions)
+                    continue
+                # Use the subject as the topic and leave the finding for the answer.
+                match = re.match(r"([A-Za-z][\w -]{5,65}?)\s+(?:achieve[ds]?|improve[ds]?|reduce[ds]?|"
+                                 r"outperform\w*|increase[ds]?|predict\w*|produce[ds]?)\s+\w", sentence)
+                if match and not re.search(
+                    r"\b(?:we|can|could|that|will|would)\b|\b(?:to|of|for|with|the|and|in)$", match[1], re.I
+                ):
+                    yield f"What does the paper report about {match[1]}?", source
+
     def _recommend(self, owner_id: str, paper_id: str, mode: str, samples: list[ChunkResponse],
                    context: str, previous_questions: list[str], limit: int) -> list[RecommendedQuestion]:
         if not samples:
             return []
         history = "\n".join(previous_questions[-10:])
-        raw = self._provider_candidates(mode, f"{context}\nPreviously asked questions:\n{history}", samples, limit * 3)
+        try:
+            raw = self._provider_candidates(mode, f"{context}\nPreviously asked questions:\n{history}", samples, limit * 3)
+        except (AnswerRateLimitError, RequestException, PyMongoError, RuntimeError, ValueError):
+            if mode != "follow_up":
+                opening = self.vectors.preview(owner_id, paper_id, limit=6)
+                samples = list({chunk.chunk_index: chunk for chunk in [*opening, *samples]}.values())
+            fallback = self._local_questions(paper_id, samples, previous_questions, limit)
+            if not fallback:
+                raise
+            self.used_local_fallback = True
+            return fallback
         result: list[RecommendedQuestion] = []
         seen = list(previous_questions)
         for candidate in raw:
@@ -128,13 +177,37 @@ class QuestionRecommendationService:
                 break
         return result
 
+    @classmethod
+    def _local_questions(cls, paper_id: str, samples: list[ChunkResponse],
+                         previous_questions: list[str], limit: int) -> list[RecommendedQuestion]:
+        seen = list(previous_questions)
+        questions = []
+        for question, source in cls._local_candidates(samples):
+            if not cls._different(question, seen):
+                continue
+            kind = cls._question_type(question)
+            questions.append(RecommendedQuestion(cls._identifier(paper_id, kind, question), question, kind, source))
+            seen.append(question)
+            if len(questions) == limit:
+                break
+        return questions
+
+    def local_suggestions(self, owner_id: str, paper_id: str, chunk_count: int,
+                          previous_questions: list[str], limit: int) -> list[RecommendedQuestion]:
+        if chunk_count <= 0:
+            return []
+        opening = self.vectors.preview(owner_id, paper_id, limit=6)
+        samples = self.vectors.sample(owner_id, paper_id, chunk_count, 16)
+        chunks = list({chunk.chunk_index: chunk for chunk in [*opening, *samples]}.values())
+        return self._local_questions(paper_id, chunks, previous_questions, limit)
+
     def starter(self, owner_id: str, paper_id: str, paper: dict) -> list[RecommendedQuestion]:
         version = f'{paper.get("file_hash", "")}:{paper.get("updated_at", "")}:{paper.get("embedding_model", "")}'
         key = (owner_id, paper_id, version, int(paper.get("chunk_count", 0)))
         now = time.monotonic()
         with self._cache_lock:
             cached = self._cache.get(key)
-            if cached and now - cached[0] < self._cache_seconds:
+            if cached and now < cached[0]:
                 self._cache.move_to_end(key)
                 return cached[1]
         # This prevents duplicate LLM work when several browser renders request
@@ -142,14 +215,15 @@ class QuestionRecommendationService:
         with self._generation_lock:
             with self._cache_lock:
                 cached = self._cache.get(key)
-                if cached and time.monotonic() - cached[0] < self._cache_seconds:
+                if cached and time.monotonic() < cached[0]:
                     self._cache.move_to_end(key)
                     return cached[1]
             samples = self.vectors.sample(owner_id, paper_id, int(paper.get("chunk_count", 0)), 16)
             recommendations = self._recommend(owner_id, paper_id, "starter", samples, "", [], 4)
             with self._cache_lock:
                 if recommendations:
-                    self._cache[key] = (time.monotonic(), recommendations)
+                    ttl = self._fallback_cache_seconds if self.used_local_fallback else self._cache_seconds
+                    self._cache[key] = (time.monotonic() + ttl, recommendations)
                 else:
                     return []
                 self._cache.move_to_end(key)

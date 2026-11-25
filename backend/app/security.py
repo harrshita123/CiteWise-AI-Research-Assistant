@@ -75,7 +75,7 @@ def create_session_token(user_id: str, settings: Settings) -> str:
             "iat": issued_at,
             "exp": expires_at,
         },
-        settings.jwt_secret,
+        settings.session_signing_secret,
         algorithm="HS256",
     )
 
@@ -84,7 +84,7 @@ def read_session_subject(token: str, settings: Settings) -> str:
     try:
         payload = jwt.decode(
             token,
-            settings.jwt_secret,
+            settings.session_signing_secret,
             algorithms=["HS256"],
             options={"require": ["sub", "exp", "iat"]},
         )

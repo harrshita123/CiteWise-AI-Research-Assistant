@@ -1,10 +1,14 @@
+import { publicationStatus } from "../utils/publicationStatus";
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
+import type { ConversationState } from "../components/WorkspaceLayout";
 import WorkspaceIcon from "../components/WorkspaceIcon";
+import PaperDiscovery from "../components/PaperDiscovery";
 import { getCurrentUser, SignedInUser } from "../services/authApi";
-import { deletePaper, getPaper, listPapers, paperFileUrl, Paper, PaperDetail, uploadPaper } from "../services/papersApi";
+import { deletePaper, getLibraryPaper, listPapers, paperFileUrl, Paper, PaperDetail, retryPublicationVerification, uploadPaper } from "../services/papersApi";
 
 export default function PapersPage() {
+  const { demoMode } = useOutletContext<ConversationState>();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const paperId = searchParams.get("paper");
@@ -19,18 +23,115 @@ export default function PapersPage() {
   const [busy, setBusy] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [loadingPaper, setLoadingPaper] = useState(false);
-  const [chunkOffset, setChunkOffset] = useState(0);
+  const [retryingVerification, setRetryingVerification] = useState(false);
+  const verificationRequest = useRef(false);
+  const [retryClock, setRetryClock] = useState(Date.now);
   const [error, setError] = useState("");
   const [offset, setOffset] = useState(0);
   const [hasNextPage, setHasNextPage] = useState(false);
   const [loadingList, setLoadingList] = useState(false);
   const selectionRequest = useRef(0);
   const uploadInput = useRef<HTMLInputElement>(null);
+  const detailsSection = useRef<HTMLElement>(null);
+  const revealUploadedPaper = useRef<string | null>(null);
+
+  const [pollingStopped, setPollingStopped] = useState<string | null>(null);
+  const selectedId = selected?.paper.id;
+  const identity = selected?.paper.publication_identity;
+  const verifying = identity?.status === "pending" || identity?.status === "checking";
+  const retryUntil = Date.parse(identity?.retry_after ?? "");
+  const coolingDown = retryUntil > retryClock;
+  const pollingExpired = !!selectedId && pollingStopped === selectedId;
+  const registry = identity?.status === "verified_published" || identity?.status === "verified_preprint"
+    ? identity : undefined;
+  const extracted = selected?.extracted_metadata;
+  const academicTitle = extracted?.title || registry?.title;
+  const authors = (registry?.authors?.length ?? 0) > (extracted?.authors?.length ?? 0)
+    ? registry?.authors : extracted?.authors || registry?.evidence?.authors_matched;
+  const venue = extracted?.venue || registry?.venue;
+  const year = extracted?.year || registry?.year;
+  const publisher = extracted?.publisher || registry?.publisher;
+  const doi = extracted?.doi || registry?.doi;
+  const arxiv = extracted?.arxiv_id || registry?.arxiv_id;
+  const pmid = extracted?.pmid || registry?.pmid;
+  const pmcid = extracted?.pmcid || registry?.pmcid;
+
+  useEffect(() => {
+    if (!Number.isFinite(retryUntil)) return;
+    setRetryClock(Date.now());
+    const timer = window.setTimeout(() => setRetryClock(Date.now()), Math.max(0, retryUntil - Date.now()) + 10);
+    return () => window.clearTimeout(timer);
+  }, [retryUntil]);
+
+  useEffect(() => {
+    if (!selectedId || !verifying || pollingExpired) return;
+    const controller = new AbortController();
+    let timer: number;
+    const deadline = window.setTimeout(() => {
+      controller.abort();
+      window.clearTimeout(timer);
+      setPollingStopped(selectedId);
+    }, 5 * 60 * 1000);
+
+    async function poll() {
+      if (!selectedId) return;
+      try {
+        const detail = await getLibraryPaper(selectedId, controller.signal);
+        if (controller.signal.aborted) return;
+        setSelected(current => current?.paper.id === selectedId ? detail : current);
+        setPapers(current => current.map(paper => paper.id === selectedId ? detail.paper : paper));
+        const status = detail.paper.publication_identity?.status;
+        if (status !== "pending" && status !== "checking") {
+          window.clearTimeout(deadline);
+          return;
+        }
+      } catch {
+        if (controller.signal.aborted) return;
+      }
+      timer = window.setTimeout(poll, 3000);
+    }
+
+    timer = window.setTimeout(poll, 3000);
+    return () => {
+      controller.abort();
+      window.clearTimeout(deadline);
+      window.clearTimeout(timer);
+    };
+  }, [selectedId, verifying, pollingExpired]);
+
+  useEffect(() => {
+    if (selectedId && revealUploadedPaper.current === selectedId) {
+      revealUploadedPaper.current = null;
+      detailsSection.current?.scrollIntoView({ block: "start" });
+    }
+  }, [selectedId]);
+
+  async function retryVerification() {
+    if (!selected || verificationRequest.current || retryUntil > Date.now()) return;
+    const id = selected.paper.id;
+    const selection = selectionRequest.current;
+    verificationRequest.current = true;
+    setRetryingVerification(true);
+    setError("");
+    try {
+      await retryPublicationVerification(id);
+      setPollingStopped(current => current === id ? null : current);
+      setSelected(current => current?.paper.id === id ? { ...current, paper: { ...current.paper,
+        publication_identity: { status: "pending", reason: "Publication identity check pending." } } } : current);
+    } catch (error) {
+      if (selection === selectionRequest.current) {
+        setError(error instanceof Error ? error.message : "Verification could not be retried.");
+      }
+    } finally {
+      verificationRequest.current = false;
+      setRetryingVerification(false);
+    }
+  }
 
   useEffect(() => {
     let active = true;
-    setSelected(null);
-    setChunkOffset(0);
+    setSelected(current => current?.paper.id === paperId ? current : null);
+    const requestId = selectionRequest.current;
     async function load() {
       try {
         const currentUser = await getCurrentUser();
@@ -41,10 +142,10 @@ export default function PapersPage() {
           setHasNextPage(results.length > 50);
           setOffset(0);
           if (paperId) {
-            const detail = await getPaper(paperId);
-            if (active && (!statusFilter || detail.paper.status === statusFilter)) {
+            const detail = await getLibraryPaper(paperId);
+            if (active && requestId === selectionRequest.current && (!statusFilter || detail.paper.status === statusFilter)) {
               setSelected(detail);
-              setChunkOffset(0);
+              setPapers(current => current.map(item => item.id === paperId ? detail.paper : item));
             }
           }
         }
@@ -97,15 +198,11 @@ export default function PapersPage() {
     setLoadingPaper(false);
     try {
       const result = await uploadPaper(file);
+      revealUploadedPaper.current = result.paper.id;
       setSelected(result);
-      setChunkOffset(0);
       setFile(null);
       if (uploadInput.current) uploadInput.current.value = "";
-      if (statusFilter) {
-        navigate(`/papers?paper=${encodeURIComponent(result.paper.id)}`);
-      } else {
-        await refresh(0);
-      }
+      navigate(`/papers?paper=${encodeURIComponent(result.paper.id)}`);
     } catch (error) {
       setError(error instanceof Error ? error.message : "Your paper could not be processed.");
       await refresh(0, false);
@@ -119,34 +216,21 @@ export default function PapersPage() {
     setLoadingPaper(true);
     setError("");
     try {
-      const detail = await getPaper(paper.id);
+      const detail = await getLibraryPaper(paper.id);
       if (requestId === selectionRequest.current) {
+        setPollingStopped(null);
         setSelected(detail);
-        setChunkOffset(0);
+        setPapers(current => current.map(item => item.id === paper.id ? detail.paper : item));
+        if (paper.id !== paperId) {
+          const params = new URLSearchParams(searchParams);
+          params.set("paper", paper.id);
+          params.delete("focus");
+          navigate(`/papers?${params}`, { replace: true });
+        }
       }
     } catch (error) {
       if (requestId === selectionRequest.current) {
-        setError(error instanceof Error ? error.message : "The preview could not be loaded.");
-      }
-    } finally {
-      if (requestId === selectionRequest.current) setLoadingPaper(false);
-    }
-  }
-
-  async function showChunkPage(nextOffset: number) {
-    if (!selected || loadingPaper) return;
-    const requestId = ++selectionRequest.current;
-    setLoadingPaper(true);
-    setError("");
-    try {
-      const detail = await getPaper(selected.paper.id, nextOffset);
-      if (requestId === selectionRequest.current) {
-        setSelected(detail);
-        setChunkOffset(nextOffset);
-      }
-    } catch (error) {
-      if (requestId === selectionRequest.current) {
-        setError(error instanceof Error ? error.message : "The chunks could not be loaded.");
+        setError(error instanceof Error ? error.message : "The paper details could not be loaded.");
       }
     } finally {
       if (requestId === selectionRequest.current) setLoadingPaper(false);
@@ -154,7 +238,7 @@ export default function PapersPage() {
   }
 
   async function handleDelete(paper: Paper) {
-    if (busy || deletingId || !window.confirm(`Delete "${paper.filename}" from your library? This also removes its saved PDF and text chunks.`)) return;
+    if (busy || deletingId || !window.confirm(`Delete "${paper.filename}" from your library? This also removes its saved PDF and extracted text.`)) return;
     setError("");
     setDeletingId(paper.id);
     try {
@@ -162,7 +246,6 @@ export default function PapersPage() {
       if (selected?.paper.id === paper.id) {
         selectionRequest.current += 1;
         setSelected(null);
-        setChunkOffset(0);
       }
       if (paperId === paper.id) navigate("/papers", { replace: true });
       await refresh(papers.length === 1 && offset > 0 ? offset - 50 : offset);
@@ -180,7 +263,7 @@ export default function PapersPage() {
       <main className="admin-main paper-main workspace-library-main">
         <p className="label">Your research library</p>
         <h1>{statusFilter === "processing" ? "Processing uploads" : statusFilter === "ready" ? "Ready papers" : statusFilter === "failed" ? "Failed uploads" : "Your papers"}</h1>
-        <p className="paper-intro">{statusFilter === "processing" ? "Papers being prepared appear here. Finished papers are available in your library." : statusFilter === "ready" ? "These papers are ready to view and inspect." : statusFilter === "failed" ? "Papers that could not be prepared appear here." : "Upload a PDF, then view the original paper and its extracted text."}</p>
+        <p className="paper-intro">{statusFilter === "processing" ? "Papers being prepared appear here. Finished papers are available in your library." : statusFilter === "ready" ? "These papers are ready to view and inspect." : statusFilter === "failed" ? "Papers that could not be prepared appear here." : "Upload a PDF, then open the original paper from your library."}</p>
         {error && <p className="oauth-error" role="alert">{error}</p>}
             {!statusFilter && <form className="paper-upload" onSubmit={handleUpload} aria-busy={busy}>
               <div className="paper-upload-heading"><span className="paper-upload-icon"><WorkspaceIcon name="upload" size={24} /></span><div><h2>Upload a PDF</h2><p id="upload-help">Text-based PDF · up to 25 MB · up to 300 pages</p></div></div>
@@ -217,10 +300,10 @@ export default function PapersPage() {
                     <div className="paper-list-row">
                       <button type="button" disabled={busy || deletingId !== null} aria-pressed={selected?.paper.id === paper.id}
                         onClick={() => void selectPaper(paper)}>
-                        <span><strong>{paper.filename}</strong><small>{paper.page_count} pages · {paper.chunk_count} chunks</small></span>
-                        <span className={`paper-status ${paper.status}`}>{paper.status === "ready" ? "Ready" : paper.status}</span>
+                        <span><strong>{paper.filename}</strong><small>{paper.page_count} pages</small></span>
+                        <span className={`paper-status ${paper.status}`}>{paper.status === "not_research" ? "Not a research paper" : paper.status === "ready" ? "Ready for Research" : paper.status === "needs_review" ? "Needs Review" : paper.status}</span>
                       </button>
-                      {paper.status === "ready" && <a className="secondary-button paper-list-view" href={paperFileUrl(paper.id)} target="_blank" rel="noopener noreferrer" aria-label={`View ${paper.filename} PDF`}>View PDF</a>}
+                      {(paper.status === "ready" || paper.status === "not_research") && <a className="secondary-button paper-list-view" href={paperFileUrl(paper.id)} target="_blank" rel="noopener noreferrer" aria-label={`View ${paper.filename} PDF`}>View PDF</a>}
                       {paper.status !== "processing" && <button className="secondary-button paper-list-delete" type="button" disabled={busy || deletingId !== null} onClick={() => void handleDelete(paper)} aria-label={`Delete ${paper.filename}`}>
                         {deletingId === paper.id ? "Deleting..." : "Delete"}
                       </button>}
@@ -237,31 +320,47 @@ export default function PapersPage() {
               </nav>
             ) : papers.length > 0 && <p className="paper-list-count">Showing all {papers.length} {papers.length === 1 ? "paper" : "papers"}</p>}
 
-            {loadingPaper && <p role="status">Loading paper preview...</p>}
+            {loadingPaper && <p role="status">Loading paper details...</p>}
             {selected && (!statusFilter || selected.paper.status === statusFilter) && (
-              <section className="paper-preview" aria-labelledby="preview-title" aria-busy={loadingPaper}>
-                <p className="label">Text preview</p>
-                <h2 id="preview-title">{selected.paper.filename}</h2>
-                {selected.paper.status === "ready" ? (
-                  <>
+              <section ref={detailsSection} className="paper-preview" aria-labelledby="preview-title" aria-busy={loadingPaper}>
+                <p className="label">Paper details</p>
+              <h2 id="preview-title">{academicTitle || selected.paper.filename}</h2>
+                {authors?.length ? <p>{authors.join(", ")}</p> : null}
+                {(venue || year || publisher) && <p>{[venue, year, publisher].filter(Boolean).join(" · ")}</p>}
+                {selected.paper.page_count > 0 && <p>{selected.paper.page_count} {selected.paper.page_count === 1 ? "page" : "pages"}</p>}
+                {doi && <p>DOI: {doi}</p>}
+                {arxiv && <p>arXiv: {arxiv}</p>}
+                {pmid && <p>PMID: {pmid}</p>}
+                {pmcid && <p>PMCID: {pmcid}</p>}
+                {extracted?.version === "accepted_manuscript" && <p>Author-accepted manuscript</p>}
+                {!!arxiv && !registry && <p>Preprint identifier found in the PDF. Publication identity is unverified.</p>}
+                {extracted?.abstract && <p><strong>Abstract</strong><br />{extracted.abstract}</p>}
+                <p role="status">{verifying
+                  ? pollingExpired ? "Automatic updates paused. Refresh the verification status to check again."
+                    : identity?.next_retry_at ? "Verification delayed. A retry is scheduled."
+                    : "Verifying publication…"
+                  : selected.paper.status === "needs_review" ? "Needs Review"
+                  : selected.paper.status === "not_research" ? "Not a research paper"
+                  : identity?.status === "verification_unavailable" ? "Verification temporarily unavailable"
+                  : publicationStatus(identity?.status)}</p>
+                {verifying && pollingExpired && <button type="button" className="secondary-button small" disabled={loadingPaper} onClick={() => void selectPaper(selected.paper)}>Refresh verification status</button>}
+                {!verifying && identity?.reason && <p>{identity.reason}</p>}
+                {!demoMode && selected.paper.status === "ready" && (!identity || ["verification_unavailable", "not_verified", "conflicting", "registry_record"].includes(identity.status)) && <button type="button" className="secondary-button small" disabled={retryingVerification || coolingDown} onClick={() => void retryVerification()}>{retryingVerification ? "Starting check…" : identity ? "Retry verification" : "Check publication identity"}</button>}
+                {coolingDown && <p>Retry available at {new Date(retryUntil).toLocaleTimeString()}.</p>}
+                {(registry?.source_url || registry?.source) && <p>
+                  {registry.source_url && <a href={registry.source_url} target="_blank" rel="noopener noreferrer">Open official academic record</a>}
+                  {registry.source_url && registry.source && " · "}{registry.source}
+                </p>}
+                {identity?.checked_at && <p>Checked: {new Date(identity.checked_at).toLocaleString()}</p>}
+                {selected.paper.status === "needs_review" && <p>{selected.paper.error}</p>}
+                {(selected.paper.status === "ready" || selected.paper.status === "not_research" || selected.paper.status === "needs_review") ? (
                     <a className="secondary-button paper-view-link" href={paperFileUrl(selected.paper.id)} target="_blank" rel="noopener noreferrer">View original PDF</a>
-                    <p>This PDF has {selected.paper.chunk_count} {selected.paper.chunk_count === 1 ? "text chunk" : "text chunks"}. Each chunk shows the page it came from.</p>
-                    {selected.paper.chunk_count > 10 && <p>Showing chunks {chunkOffset + 1}–{chunkOffset + selected.chunks.length} of {selected.paper.chunk_count}.</p>}
-                    {selected.chunks.map((chunk) => (
-                      <article className="paper-chunk" key={chunk.chunk_index}>
-                        <h3>Chunk {chunk.chunk_index + 1} <span>Page {chunk.page_number}</span></h3>
-                        <p>{chunk.text}</p>
-                      </article>
-                    ))}
-                    {selected.paper.chunk_count > 10 && <nav className="paper-pagination" aria-label="Chunk preview pages">
-                      <button className="secondary-button" type="button" disabled={loadingPaper || chunkOffset === 0} onClick={() => void showChunkPage(Math.max(0, chunkOffset - 10))}>Previous chunks</button>
-                      <span>Chunks {chunkOffset + 1}–{chunkOffset + selected.chunks.length}</span>
-                      <button className="secondary-button" type="button" disabled={loadingPaper || chunkOffset + selected.chunks.length >= selected.paper.chunk_count} onClick={() => void showChunkPage(chunkOffset + 10)}>Next chunks</button>
-                    </nav>}
-                  </>
                 ) : <p>{selected.paper.error || "This paper is still processing. Refresh the list to check its status."}</p>}
               </section>
             )}
+        {!statusFilter && (demoMode
+          ? <section className="paper-preview"><h2>Discover academic papers</h2><p>Live discovery is unavailable in Demo Mode. Open the bundled sample from your Library.</p></section>
+          : <PaperDiscovery />)}
       </main>
     </>
   );

@@ -66,8 +66,7 @@ input::placeholder, textarea::placeholder { color: #858585; }
 .paper-list button, .paper-preview, .paper-chunk, .research-form,
 .research-results, .research-history, .research-composer, .research-message-answer,
 .research-transcript .research-message-answer, .answer-preview, .admin-header,
-.admin-table-wrap, .evaluation-notice, .evaluation-metric, .evaluation-card,
-.evaluation-case, .evaluation-empty, .evaluation-runs li button {
+.admin-table-wrap {
   color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface); box-shadow: none;
 }
 .home-table-wrap, .paper-file-picker, .research-message-question,
@@ -77,7 +76,6 @@ input::placeholder, textarea::placeholder { color: #858585; }
 }
 .secondary-button, .paper-picker-action, .research-library-link,
 .research-form select, .research-form textarea, .field input,
-.evaluation-case input, .evaluation-case select, .evaluation-case textarea,
 .answer-feedback button, .answer-feedback select,
 .research-delete-dialog button, .workspace-page .research-history-rename button {
   color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface-raised);
@@ -91,7 +89,6 @@ input::placeholder, textarea::placeholder { color: #858585; }
 .secondary-button:hover, .paper-picker-action:hover,
 .paper-file-picker:hover, .paper-file-input:focus-visible + .paper-file-picker,
 .home-actions > a:hover, .paper-list button:hover,
-.evaluation-runs li button:hover, .evaluation-runs li button.active,
 .answer-feedback button:hover { color: var(--dark-text); border-color: #777c9b; background: var(--dark-hover); }
 :is(button, input, select, textarea):disabled { opacity: .55; cursor: not-allowed; }
 .paper-file-picker { border-style: dashed; }
@@ -99,14 +96,12 @@ input::placeholder, textarea::placeholder { color: #858585; }
 /* Page titles, body copy, metadata, and links. */
 .workspace-page, .workspace-page h1, .workspace-page h2, .workspace-page h3,
 .workspace-page h4, .auth-card h1, .admin-main h1, .hero h1,
-.evaluation-header h1, .evaluation-card-heading h2,
 .research-header h1, .research-welcome h2,
 .home-header h1, .home-card h2, .home-featured-paper h3,
 .home-stat strong, .home-actions strong, .coming-card h1,
 .paper-main h1, .research-message p, .research-answer,
 .answer-check-item > h3, .answer-check-detail .answer-sources > h4,
-.answer-check-detail .paper-chunk h4, .evaluation-result h3,
-.evaluation-pages strong, .admin-summary strong { color: var(--dark-text); }
+.answer-check-detail .paper-chunk h4, .admin-summary strong { color: var(--dark-text); }
 .workspace-page small, .workspace-page .label, .research-intro,
 .research-pending-status, .research-welcome, .research-composer-hint,
 .research-source-help, .research-form-note, .answer-check-note,
@@ -114,9 +109,7 @@ input::placeholder, textarea::placeholder { color: #858585; }
 .paper-empty-state p, .paper-preview > p:not(.label),
 .home-header p:last-child, .home-featured-paper p,
 .home-recent th, .home-processing > p, .home-empty,
-.home-actions small, .coming-card p, .evaluation-header p:last-child,
-.evaluation-help, .evaluation-result p, .evaluation-footnote,
-.evaluation-pages, .admin-summary, .auth-description, .auth-footer,
+.home-actions small, .coming-card p, .admin-summary, .auth-description, .auth-footer,
 .answer p, .source p, .source small, .hero-text, .steps p {
   color: var(--dark-subtle);
 }
@@ -125,15 +118,14 @@ input::placeholder, textarea::placeholder { color: #858585; }
 .answer-citation, .paper-chunk a,
 .answer-check-detail .paper-chunk a, .auth-footer a,
 .home-recent td:last-child a, .home-card a, .open-paper,
-.research-library-link, .evaluation-case legend { color: var(--dark-accent); }
+.research-library-link { color: var(--dark-accent); }
 .answer-citation:hover,
 .paper-chunk a:hover { color: #d1d5ff; }
 
 /* Research transcript, evidence, feedback, and composer. */
 .research-message, .research-message .answer-sources, .answer-feedback,
 .answer-check-item, .answer-check-detail .answer-sources,
-.research-history-heading, .evaluation-card-heading,
-.evaluation-result, .answer { border-color: var(--dark-border); }
+.research-history-heading, .answer { border-color: var(--dark-border); }
 .research-message-question { background: #34354a; }
 .research-message-question > span { color: #c1c8ff; }
 .research-message-answer > span { color: #9ad3d1; }
@@ -142,23 +134,21 @@ input::placeholder, textarea::placeholder { color: #858585; }
 .research-results .paper-chunk { border-left-color: var(--dark-accent); }
 .answer-feedback > span, .answer-feedback-reason label,
 .research-message .answer-sources > h3, .answer-check-detail .paper-chunk p,
-.research-form label, .evaluation-case label { color: var(--dark-text); }
+.research-form label { color: var(--dark-text); }
 .answer-feedback button[aria-pressed="true"], .paper-list button[aria-pressed="true"] {
   color: var(--dark-accent); border-color: var(--dark-accent); background: var(--dark-selected);
 }
 .answer-feedback small, .form-message { color: #a5e2c5; }
-.paper-status, .role-badge, .home-status,
-.evaluation-outcome, .evaluation-card-heading > span {
+.paper-status, .role-badge, .home-status {
   color: var(--dark-accent); background: var(--dark-selected);
 }
-.paper-status.failed,
-.evaluation-outcome.miss { color: var(--dark-danger); background: #493039; }
-.paper-status.ready, .evaluation-outcome.hit { color: #a5e2c5; background: #244039; }
+.paper-status.failed { color: var(--dark-danger); background: #493039; }
+.paper-status.ready { color: #a5e2c5; background: #244039; }
 .research-progress, .form-message, .home-error,
-.admin-error, .evaluation-error, .oauth-error {
+.admin-error, .oauth-error {
   color: #f5d28e; border-color: #665132; background: #3d3429;
 }
-.form-error, .research-history-error, .evaluation-remove,
+.form-error, .research-history-error,
 .paper-list .paper-list-delete, .research-conversation-menu .research-conversation-menu-delete {
   color: var(--dark-danger);
 }
@@ -182,11 +172,6 @@ input::placeholder, textarea::placeholder { color: #858585; }
   color: var(--dark-accent); background: var(--dark-selected);
 }
 .paper-list .paper-list-delete:hover { color: var(--dark-danger); border-color: #8d4c59; background: #493039; }
-.evaluation-metric > span, .evaluation-metric p,
-.evaluation-result p, .evaluation-runs li small { color: var(--dark-subtle); }
-.evaluation-metric strong, .evaluation-card-heading .label,
-.evaluation-result h3 { color: var(--dark-accent); }
-.evaluation-case, .evaluation-empty, .evaluation-runs li button { background: var(--dark-surface-raised); }
 .auth-intro, .research-flow, footer { color: var(--dark-text); background: var(--dark-header); }
 .auth-intro > div > p:last-child, .auth-intro blockquote,
 .friction, .research-flow .label { color: var(--dark-subtle); }
@@ -198,7 +183,7 @@ input::placeholder, textarea::placeholder { color: #858585; }
 
 /* Rules whose existing page selectors are more specific than the shared groups. */
 .workspace-page .home-main, .workspace-page .research-main,
-.workspace-page .workspace-library-main, .workspace-page .evaluation-main,
+.workspace-page .workspace-library-main,
 .workspace-page .answer-check-main { background: var(--dark-main); }
 .workspace-conversation-navigation .research-history li > button:first-child,
 .workspace-conversation-navigation .research-history-menu-trigger { color: var(--dark-text); background: transparent; }
@@ -210,8 +195,7 @@ input::placeholder, textarea::placeholder { color: #858585; }
 .secondary-button:hover:not(:disabled) { color: var(--dark-text); border-color: #777c9b; background: var(--dark-hover); }
 .site-header .logo, .hero h1, .auth-card h1,
 .paper-main h1, .paper-library-heading h2, .admin-main h1,
-.workspace-page .research-header h1, .evaluation-header h1,
-.evaluation-card-heading h2 { color: var(--dark-text); }
+.workspace-page .research-header h1 { color: var(--dark-text); }
 .workspace-page .research-message-question { border-color: var(--dark-border); background: #34354a; }
 .workspace-page .research-composer, .workspace-page .research-form,
 .workspace-page .research-results, .workspace-page .research-message-answer,
@@ -258,11 +242,7 @@ input::placeholder, textarea::placeholder { color: #858585; }
 }
 .paper-library-heading { border-color: var(--dark-border); }
 .paper-preview .paper-chunk { border-left-color: var(--dark-accent); }
-.evaluation-case input, .evaluation-case select, .evaluation-case textarea,
 .research-form select, .research-form textarea, .field input {
   color: var(--dark-text); border-color: var(--dark-border); background: var(--dark-surface-raised);
-}
-.evaluation-runs li button:hover, .evaluation-runs li button.active {
-  color: var(--dark-text); border-color: var(--dark-accent); background: var(--dark-selected);
 }
 }

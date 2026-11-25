@@ -1,4 +1,4 @@
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 from ipaddress import ip_address
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -130,22 +130,19 @@ class TavilyExternalSearch:
             return SearchOutcome(list(cached.results), True, cached.rejected_irrelevant,
                                  cached.raw_results, cached.invalid_results, cached.invalid_urls,
                                  cached.rejected_domains, cached.duplicates)
-        official_india_law = bool(re.search(r"\b(india|indian)\b", query, re.I)
-                                  and re.search(r"\b(legal|law|regulation|biometric|data protection)\b", query, re.I))
-        search_query = f"{query} site:gov.in OR site:nic.in" if official_india_law else query
         response = requests.post(self.endpoint,
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            json={"query": search_query[:500], "search_depth": self.search_depth, "max_results": self.max_results,
+            json={"query": query[:500], "search_depth": self.search_depth, "max_results": self.max_results,
                   "include_answer": False, "include_published_date": True},
             timeout=self.timeout_seconds)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
             raise ValueError("Tavily returned a malformed search response")
-        candidates: list[tuple[int, ExternalEvidence]] = []
+        candidates: list[tuple[tuple[int, int], ExternalEvidence]] = []
         rejected_irrelevant = 0
         invalid_results = invalid_urls = rejected_domains = duplicates = 0
-        seen_urls: set[str] = set()
+        seen_urls: set[tuple[str, str, tuple[tuple[str, str], ...]]] = set()
         for item in payload["results"]:
             if not isinstance(item, dict):
                 invalid_results += 1
@@ -163,17 +160,14 @@ class TavilyExternalSearch:
                 continue
             parsed = urlparse(url)
             host = (parsed.hostname or "").lower()
-            if official_india_law and not host.endswith((".gov.in", ".nic.in")):
-                rejected_domains += 1
-                continue
-            if not official_india_law and not self._trusted_host(host):
-                rejected_domains += 1
-                continue
             title = item.get("title") if isinstance(item.get("title"), str) else parsed.netloc
             if not self._relevant(query, title, content):
                 rejected_irrelevant += 1
                 continue
-            canonical = f"{host}{parsed.path.rstrip('/') or '/'}"
+            query_fields = tuple((key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                                 if not key.lower().startswith("utm_")
+                                 and key.lower() not in {"fbclid", "gclid", "tracking"})
+            canonical = (host, parsed.path.rstrip('/') or '/', query_fields)
             if canonical in seen_urls:
                 duplicates += 1
                 continue
@@ -185,7 +179,8 @@ class TavilyExternalSearch:
                 publisher=item.get("publisher") if isinstance(item.get("publisher"), str) else None,
                 author=item.get("author") if isinstance(item.get("author"), str) else None)
             query_terms = self._terms(query)
-            score = 2 * len(query_terms & self._terms(title)) + len(query_terms & self._terms(content))
+            score = (2 * len(query_terms & self._terms(title))
+                     + len(query_terms & self._terms(content)), int(self._trusted_host(host)))
             candidates.append((score, source))
         candidates.sort(key=lambda item: item[0], reverse=True)
         diverse = []

@@ -1,16 +1,42 @@
+type AcademicMetadata = {
+  title?: string | null;
+  authors?: string[] | null;
+  abstract?: string | null;
+  version?: string | null;
+  year?: number | null;
+  venue?: string | null;
+  publisher?: string | null;
+  doi?: string | null;
+  arxiv_id?: string | null;
+  pmid?: string | null;
+  pmcid?: string | null;
+};
+
 export type Paper = {
   id: string;
   filename: string;
-  status: "processing" | "ready" | "failed";
+  status: "processing" | "ready" | "failed" | "not_research" | "needs_review";
   page_count: number;
   chunk_count: number;
   embedding_model: string;
   embedding_dimensions: number;
   created_at: string;
   error: string | null;
+  publication_identity?: (AcademicMetadata & {
+    status: string;
+    demo_sample?: boolean;
+    reason?: string;
+    checked_at?: string;
+    next_retry_at?: string;
+    retry_after?: string;
+    evidence?: { authors_matched?: string[] };
+    source?: string;
+    source_url?: string | null;
+  }) | null;
 };
 
 export type PaperDetail = {
+  extracted_metadata?: AcademicMetadata | null;
   paper: Paper;
   chunks: { chunk_index: number; page_number: number; text: string; content_hash: string }[];
 };
@@ -55,6 +81,10 @@ export function getPaper(id: string, chunkOffset = 0) {
   return request<PaperDetail>(`/${encodeURIComponent(id)}?chunk_offset=${chunkOffset}`);
 }
 
+export function getLibraryPaper(id: string, signal?: AbortSignal) {
+  return request<PaperDetail>(`/${encodeURIComponent(id)}?include_chunks=false`, { signal });
+}
+
 export function paperFileUrl(id: string) {
   return `${apiBaseUrl}/api/v1/papers/${encodeURIComponent(id)}/file`;
 }
@@ -67,4 +97,8 @@ export function uploadPaper(file: File) {
 
 export function deletePaper(id: string) {
   return request<null>(`/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function retryPublicationVerification(id: string) {
+  return request<{status: string}>(`/${encodeURIComponent(id)}/verification/retry`, { method: "POST" });
 }

@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import time
@@ -7,6 +9,8 @@ import unittest
 from unittest.mock import Mock, patch
 from datetime import datetime, timezone
 from pathlib import Path
+from requests.exceptions import HTTPError, Timeout
+import pymupdf
 
 from fastapi import FastAPI
 from starlette.requests import Request
@@ -18,7 +22,8 @@ from app.paper_models import ChunkResponse
 from app.repositories.vectors import VectorRepository
 from app.providers.answers import (AnswerRateLimitError, ClaimAssessment, ClaimQuote, EvidenceAssessment, EvidenceQuote, ExternalAnswer,
                                    ExternalEvidence, GeneratedAnswer)
-from app.providers.groq_answers import GroqAnswerProvider
+from app.providers.openrouter_answers import OpenRouterAnswerProvider
+from app.providers.openrouter_routing import FAST_MODEL, GENERATION_MODEL, PDF_FALLBACK_MODEL, VERIFICATION_MODEL, ModelRouter, UpstreamPoolLimit
 from app.providers.external_search import TavilyExternalSearch
 from app.routers.research import (_evidence_context, _evidence_excerpt, _generation_passages,
                                   _asks_only_about_pdf, _follow_up_uses_pdf,
@@ -26,7 +31,7 @@ from app.routers.research import (_evidence_context, _evidence_excerpt, _generat
                                   _validate_assessment, _reconcile_assessment_gap, _coverage_gap_message,
                                   _verified_answer_parts,
                                   _assessment_gap_in_selected_chunks, _verified_sections,
-                                  _local_claim_debug, _retrieve, AnswerSource, ClaimQuoteResponse, ClaimReviewResponse,
+                                  _local_claim_debug, _retrieve, _simple_generation, AnswerSource, ClaimQuoteResponse, ClaimReviewResponse,
                                   EvidenceReview, SearchRequest, router)
 from app.services.evidence_coverage import missing_coverage, requested_coverage
 from app.services.claim_verification import split_claims
@@ -114,8 +119,8 @@ class ExternalSearch:
         self.queries.append(query)
         if "India biometric law" in query:
             return [ExternalEvidence("ext1", "Digital Personal Data Protection Act",
-                                     "https://www.meity.gov.in/notice", "Official personal data law excerpt")]
-        return [ExternalEvidence("ext1", "Research source", "https://example.org/study", "External result")]
+                                     "https://www.meity.gov.in/notice", "Official India biometric data law excerpt")]
+        return [ExternalEvidence("ext1", query, "https://example.org/study", f"External result about {query}")]
 
 
 class Conversations:
@@ -201,6 +206,212 @@ class ResearchTests(unittest.TestCase):
             id="alice", email="alice@example.com", role="user")
         self.client = TestClient(app)
 
+    def test_simple_routing_requires_one_independent_lookup_and_one_passage(self):
+        simple = "How many participants enrolled?"
+        solo = ["The study enrolled 200 participants."]
+        self.assertTrue(_simple_generation(simple, simple, solo))
+        self.assertTrue(_simple_generation("What does attrition mean?", "What does attrition mean?", solo))
+        self.assertFalse(_simple_generation(simple, simple, solo * 2))
+        self.assertFalse(_simple_generation(simple, f"Earlier study. Follow-up question: {simple}", solo))
+        for complex_question in ("What was the study design?", "What is the percentage change since baseline?",
+                                 "What was the sample size and follow-up duration?", "Compare the findings.",
+                                 "Alpha?"):
+            with self.subTest(question=complex_question):
+                self.assertFalse(_simple_generation(complex_question, complex_question, solo))
+
+    def test_simple_pdf_answer_runs_one_generator_and_preserves_verification_on_retry(self):
+        self.client.app.state.answer_provider = OpenRouterAnswerProvider("key", ModelRouter())
+        passage = "The Alpha measurement was eight units."
+        self.client.app.state.ingestion_service.vectors.save("alice", "paper-1",
+            [TextChunk(0, 1, passage, "hash-measurement")], [[1.0, 0.0]])
+        source_id = "c0-hash-measure"
+        values = [
+            {"level": "sufficient", "chunk_ids": [source_id], "missing_information": "",
+             "supporting_quotes": [{"chunk_id": source_id, "quote": passage}]},
+            {"status": "answered", "text": f"The Alpha measurement was eight units [{source_id}].",
+             "evidence_ids": [source_id]},
+            {"claims": [{"claim_id": "claim-1", "status": "supported",
+                         "supporting": [{"source_id": source_id, "quote": passage}],
+                         "opposing": [], "explanation": "Direct observation.", "question_fit": "direct",
+                         "evidence_use": "establishes_claim", "unsupported_source_ids": [], "scope_preserved": True}],
+             "requirements": [{"requirement": "Identify the result", "addressed_by": ["claim-1"]}]},
+        ]
+        responses = []
+        for value in [*values, values[-1]]:
+            reply = Mock(status_code=200)
+            reply.json.return_value = {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(value)}}]}
+            responses.append(reply)
+        with patch("app.providers.openrouter_answers.requests.post", side_effect=responses) as transport:
+            for expected_calls in (3, 4):
+                response = self.client.post("/api/v1/research/ask",
+                    json={"paper_id": "paper-1", "question": "What was the Alpha measurement?"})
+                self.assertEqual(response.status_code, 200, response.text)
+                data = response.json()
+                self.assertEqual(data["verification_status"], "verified", data)
+                self.assertEqual([source["page_number"] for source in data["sources"]], [1])
+                self.assertEqual(transport.call_count, expected_calls)
+        self.assertEqual([call.kwargs["json"]["model"] for call in transport.call_args_list],
+                         [VERIFICATION_MODEL, FAST_MODEL, VERIFICATION_MODEL, VERIFICATION_MODEL])
+
+    def test_retrieval_cache_requires_same_owner_and_current_paper_version(self):
+        default = {"status": "ready", "file_hash": "digest", "updated_at": "v1", "chunk_count": 2}
+        repository = self.client.app.state.paper_repository
+        ingestion = self.client.app.state.ingestion_service
+        payload = {"paper_id": "paper-1", "question": "Alpha?", "limit": 1}
+        with patch.object(repository, "find", return_value=default.copy()) as find, \
+                patch.object(ingestion.embeddings, "embed", wraps=ingestion.embeddings.embed) as embed:
+            first = self.client.post("/api/v1/research/search", json=payload)
+            second = self.client.post("/api/v1/research/search", json=payload)
+            self.assertEqual(first.json(), second.json())
+            self.assertEqual(embed.call_count, 1)
+            self.client.app.dependency_overrides[get_current_user] = lambda: UserResponse(
+                id="bob", email="bob@example.com", role="user")
+            other = self.client.post("/api/v1/research/search", json=payload)
+            self.assertEqual(embed.call_count, 2)
+            self.assertNotEqual(first.json(), other.json())
+            find.return_value = {**default, "updated_at": "v2"}
+            self.assertEqual(self.client.post("/api/v1/research/search", json=payload).status_code, 200)
+            self.assertEqual(embed.call_count, 3)
+            find.return_value = None
+            self.assertEqual(self.client.post("/api/v1/research/search", json=payload).status_code, 404)
+
+    def test_simple_external_route_keeps_tavily_provenance_and_verifies_once(self):
+        self.client.app.state.answer_provider = OpenRouterAnswerProvider("key", ModelRouter())
+        self.client.app.state.external_search = TavilyExternalSearch("test-key")
+        passage = "The Alpine station opened in 2012."
+        url = "https://example.edu/alpine-station"
+        question = {"paper_id": "paper-1", "question": "When did the Alpine station open?"}
+        assessment = {"level": "none", "chunk_ids": [], "missing_information": "", "supporting_quotes": []}
+        attempts = []
+        def reply_for(endpoint, **kwargs):
+            response = Mock(status_code=200)
+            if "tavily.com" in endpoint:
+                response.json.return_value = {"results": [{"title": "Alpine station opening",
+                    "url": url, "content": passage, "published_date": "2022-01-01"}]}
+                return response
+            body = kwargs["json"]
+            stage = body.get("response_format", {}).get("json_schema", {}).get("name")
+            attempts.append(body["model"])
+            if stage == "citewise_evidence_assessment":
+                value = assessment
+            else:
+                source_id = re.search(r"(?:\[|Source ID: )(ext[\w-]+)", body["messages"][1]["content"]).group(1)
+                if stage == "citewise_external_answer":
+                    value = {"pdf_text": "", "pdf_ids": [], "external_text": f"{passage[:-1]} [{source_id}].",
+                             "external_ids": [source_id]}
+                else:
+                    value = {"claims": [{"claim_id": "claim-1", "status": "supported",
+                        "supporting": [{"source_id": source_id, "quote": passage}], "opposing": [],
+                        "explanation": "Direct opening year.", "question_fit": "direct",
+                        "evidence_use": "establishes_claim", "unsupported_source_ids": [], "scope_preserved": True}],
+                        "requirements": [{"requirement": "Identify the opening year", "addressed_by": ["claim-1"]}]}
+            response.json.return_value = {"choices": [{"finish_reason": "stop", "message": {
+                "content": json.dumps(value)}}]}
+            return response
+
+        with patch("app.providers.openrouter_answers.requests.post", side_effect=reply_for) as post:
+            result = self.client.post("/api/v1/research/ask", json=question)
+        self.assertEqual(result.status_code, 200, result.text)
+        data = result.json()
+        self.assertEqual(data["verification_status"], "verified", data)
+        self.assertEqual(data["sources"], [])
+        self.assertEqual([source["url"] for source in data["external_sources"]], [url])
+        self.assertEqual(data["search_trace"]["tavily_calls"], 1)
+        self.assertEqual(attempts, [VERIFICATION_MODEL, FAST_MODEL, VERIFICATION_MODEL])
+        self.assertEqual(post.call_count, 4)
+
+    def test_evidence_gap_without_external_sources_skips_generation_and_verification(self):
+        self.client.app.state.answer_provider = OpenRouterAnswerProvider("key", ModelRouter())
+        assessment = {"level": "none", "chunk_ids": [], "missing_information": "", "supporting_quotes": []}
+        reply = Mock(status_code=200)
+        reply.json.return_value = {"choices": [{"finish_reason": "stop",
+            "message": {"content": json.dumps(assessment)}}]}
+        with patch("app.providers.openrouter_answers.requests.post", return_value=reply) as post:
+            response = self.client.post("/api/v1/research/ask",
+                json={"paper_id": "paper-1", "question": "What was the antenna length?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(response.json()["status"], ("not_mentioned", "insufficient_evidence"))
+        self.assertEqual(response.json()["sources"], [])
+        post.assert_called_once()
+        self.assertEqual(post.call_args.kwargs["json"]["model"], VERIFICATION_MODEL)
+
+    def test_visual_analysis_requires_consent_insufficient_text_and_owned_page(self):
+        provider = OpenRouterAnswerProvider("test-key", ModelRouter(), vision_enabled=True)
+        self.client.app.state.answer_provider = provider
+        with pymupdf.open() as pdf:
+            pdf.new_page(width=120, height=140)
+            pdf.new_page(width=160, height=180)
+            self.client.app.state.ingestion_service.read_original = Mock(return_value=pdf.tobytes())
+        original = self.client.app.state.ingestion_service.read_original
+        route = "/api/v1/research/visual-analysis"
+        payload = {"paper_id": "paper-1", "page_number": 2, "question": "What trend does the chart show?",
+                   "evidence_type": "chart", "text_insufficient": True, "consent_to_send_page": True}
+        good = Mock(status_code=200)
+        good.json.return_value = {"choices": [{"message": {"content": '{"observation":"Trend unclear."}'}}]}
+        with patch("app.providers.openrouter_answers.requests.post", return_value=good) as post:
+            for field in ("text_insufficient", "consent_to_send_page"):
+                self.assertEqual(self.client.post(route, json={**payload, field: False}).status_code, 422)
+            self.assertEqual(self.client.post(route, json={**payload, "paper_id": "other"}).status_code, 404)
+            provider.vision_enabled = False
+            self.assertEqual(self.client.post(route, json=payload).status_code, 503)
+            original.assert_not_called()
+            provider.vision_enabled = True
+            self.assertEqual(self.client.post(route, json={**payload, "page_number": 3}).status_code, 404)
+            post.assert_not_called()
+            response = self.client.post(route, json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["page_number"], 2)
+        self.assertEqual(response.json()["verification_status"], "unverified")
+        self.assertEqual(response.json()["model_id"], "nvidia/nemotron-3.5-super-vl:free")
+        post.assert_called_once()
+        body = post.call_args.kwargs["json"]
+        self.assertTrue(body["provider"]["zdr"])
+        image = body["messages"][1]["content"][1]["image_url"]["url"]
+        self.assertTrue(image.startswith("data:image/png;base64,"))
+
+    def test_rerank_opt_in_uses_authorized_candidates_and_falls_back_on_failure(self):
+        provider = OpenRouterAnswerProvider("test-key", ModelRouter())
+        self.client.app.state.answer_provider = provider
+        query = SearchRequest(paper_id="paper-1", question="Alpha?", limit=1)
+        request = Request({"type": "http", "app": self.client.app})
+        user = UserResponse(id="alice", email="alice@example.com", role="user")
+        with patch.object(provider, "rerank", side_effect=[[1], AnswerRateLimitError("60")]) as rerank:
+            original = asyncio.run(_retrieve(query, request, user, expand=True))
+            rerank.assert_not_called()
+            provider.rerank_enabled = True
+            reranked = asyncio.run(_retrieve(query, request, user, expand=True))
+            fallback = asyncio.run(_retrieve(query, request, user, expand=True))
+        self.assertEqual(rerank.call_args.args, ("Alpha?", ["Alpha result", "Beta result"], 1))
+        self.assertEqual([(item.chunk_index, item.page_number) for item in reranked], [(1, 2)])
+        self.assertEqual(fallback, original)
+
+    def test_ready_marker_cannot_bypass_failed_document_gate(self):
+        repository = self.client.app.state.paper_repository
+        from unittest.mock import AsyncMock
+        with patch.object(repository, "find", new=AsyncMock(return_value={
+            "status": "ready", "document_state": "READY_FOR_RESEARCH", "verification_checks": [
+                {"check_id": "H4", "status": "FAIL"},
+            ],
+        })):
+            result = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1", "question": "What was measured?"})
+        self.assertEqual(result.status_code, 409)
+        self.assertFalse(self.client.app.state.conversation_repository.items)
+
+    def test_missing_grounding_cannot_be_saved_as_verified(self):
+        self.client.app.state.answer_provider = Answers(GeneratedAnswer("A reported outcome.", ["invented"]))
+        result = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1", "question": "What was measured?"})
+        self.assertEqual(result.status_code, 200, result.text)
+        public = result.json()
+        self.assertEqual(public["answer_state"], "INSUFFICIENT_EVIDENCE")
+        self.assertEqual(public["verification_status"], "not_verified")
+        message = self.client.app.state.conversation_repository.items[public["conversation_id"]]["messages"][0]
+        checks = {item["check_id"]: item for item in message["verification_checks"]}
+        self.assertEqual(checks["AH4"]["status"], "FAIL")
+        self.assertEqual(len(checks), 17)
+        reopened = self.client.get(f"/api/v1/research/conversations/{public['conversation_id']}").json()["messages"][0]
+        self.assertNotIn("verification_checks", reopened)
+        self.assertEqual(reopened["answer_state"], public["answer_state"])
+
     def test_methodology_comparison_reports_unverified_parts(self):
         question = ("Compare the methodologies used in Study A and Study B. "
                     "Explain their study designs, participants, and important methodological differences.")
@@ -248,7 +459,7 @@ class ResearchTests(unittest.TestCase):
             "What were Study C's design and participants?", claims[:1]),
             ["Study C's participants"])
 
-    def test_pdf_scoped_gap_does_not_trigger_external_search(self):
+    def test_pdf_scoped_gap_triggers_external_search(self):
         search = ExternalSearch()
         self.client.app.state.external_search = search
         provider = AssessedAnswers(EvidenceAssessment("none", []))
@@ -257,9 +468,9 @@ class ResearchTests(unittest.TestCase):
             "paper_id": "paper-1", "question": "Does this PDF report long-term outcomes?"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "not_mentioned")
-        self.assertEqual(response.json()["search_trace"]["tavily_calls"], 0)
-        self.assertEqual(search.queries, [])
-        self.assertEqual(provider.external_calls, 0)
+        self.assertEqual(response.json()["search_trace"]["tavily_calls"], 1)
+        self.assertEqual(len(search.queries), 1)
+        self.assertEqual(provider.external_calls, 1)
         provider.assessment = EvidenceAssessment("partial", ["c0-hash-a"],
             "Beta findings are not established.", [EvidenceQuote("c0-hash-a", "Alpha result")])
         partial = self.client.post("/api/v1/research/ask", json={
@@ -267,13 +478,13 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(partial.status_code, 200)
         self.assertEqual(partial.json()["assessment"]["level"], "partial")
         self.assertEqual(partial.json()["sources"][0]["id"], "c0-hash-a")
-        self.assertIn("Beta findings", partial.json()["answer"])
-        self.assertEqual(search.queries, [])
+        self.assertIn("external sources", partial.json()["answer"])
+        self.assertEqual(len(search.queries), 2)
         self.assertTrue(_asks_only_about_pdf("What does this paper say about privacy?"))
         self.assertFalse(_asks_only_about_pdf("What are the current legal requirements in India?"))
         self.assertFalse(_asks_only_about_pdf("What does this paper say and what do external sources say?"))
 
-    def test_contextual_pdf_follow_up_keeps_partial_evidence_without_external_search(self):
+    def test_contextual_pdf_follow_up_searches_external_evidence(self):
         search = ExternalSearch()
         self.client.app.state.external_search = search
         provider = AssessedAnswers(EvidenceAssessment("sufficient", ["c0-hash-a"],
@@ -291,12 +502,30 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(follow_up.status_code, 200)
         body = follow_up.json()
         self.assertEqual(body["status"], "partially_supported")
-        self.assertEqual(body["search_trace"]["tavily_calls"], 0)
-        self.assertEqual(body["external_sources"], [])
+        self.assertEqual(body["search_trace"]["tavily_calls"], 1)
+        self.assertTrue(body["external_sources"])
         self.assertEqual([item["id"] for item in body["sources"]], ["c0-hash-a"])
-        self.assertEqual(search.queries, [])
-        self.assertEqual(provider.external_calls, 0)
-        self.assertNotIn("external answer", body["answer"].lower())
+        self.assertEqual(len(search.queries), 1)
+        self.assertEqual(provider.external_calls, 1)
+        self.assertIn("external sources", body["answer"].lower())
+
+    def test_verified_pdf_partial_result_continues_to_external_search(self):
+        class PartiallyVerified(AssessedAnswers):
+            def generate(self, question, evidence):
+                return GeneratedAnswer("Alpha result [c0-hash-a].", ["c0-hash-a"])
+
+        search = ExternalSearch()
+        self.client.app.state.external_search = search
+        provider = PartiallyVerified(EvidenceAssessment("partial", ["c0-hash-a"],
+            "The selected PDF chunks contain information omitted from the cited quotes.",
+            [EvidenceQuote("c0-hash-a", "Alpha result")]))
+        self.client.app.state.answer_provider = provider
+        response = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "What do the Alpha and Beta results establish?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["search_trace"]["tavily_calls"], 1)
+        self.assertEqual(provider.external_calls, 1)
+        self.assertTrue(response.json()["external_sources"])
 
     def test_follow_up_scope_uses_current_request_and_paper_bound_parent(self):
         conversation = {"messages": [{"id": "first", "question":
@@ -1024,8 +1253,137 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual({item["page_number"] for item in response.json()["sources"]}, {3, 4})
         self.assertEqual(search.queries, [])
 
+    def test_openrouter_failover_keeps_grounding_and_records_quality_provenance(self):
+        budget = Mock()
+        budget.reserve.side_effect = [None, None, None, None, UpstreamPoolLimit("60"), None]
+        self.client.app.state.answer_provider = OpenRouterAnswerProvider("test-key", ModelRouter(), budget=budget)
+        search = ExternalSearch()
+        self.client.app.state.external_search = search
+        outputs = [
+            {"level": "sufficient", "chunk_ids": ["c0-hash-a"], "missing_information": "",
+             "supporting_quotes": [{"chunk_id": "c0-hash-a", "quote": "Alpha result"}]},
+            {"status": "answered", "text": "Alpha result [c0-hash-a].", "evidence_ids": ["c0-hash-a"]},
+            {"claims": [{"claim_id": "claim-1", "status": "supported",
+                         "supporting": [{"source_id": "c0-hash-a", "quote": "Alpha result"}],
+                         "opposing": [], "explanation": "The passage states the result.",
+                         "question_fit": "direct", "evidence_use": "establishes_claim",
+                         "unsupported_source_ids": [], "scope_preserved": True}],
+             "requirements": [{"requirement": "Identify the result", "addressed_by": ["claim-1"]}]},
+        ]
+        limited = Mock(status_code=429, headers={})
+        limited.json.return_value = {"error": {"metadata": {"limit_source": "upstream_provider_shared_pool"}}}
+        responses = [limited]
+        for index, output in enumerate(outputs):
+            upstream = Mock(status_code=200)
+            is_generation = index == 1
+            content = f'STATUS: {output["status"]}\n{output["text"]}' if is_generation else json.dumps(output)
+            upstream.json.return_value = {"provider": "Google AI Studio" if is_generation else "Baidu",
+                "choices": [{"finish_reason": "stop", "message": {"content": content}}]}
+            responses.append(upstream)
+        no_endpoint = Mock(status_code=404, headers={})
+        no_endpoint.json.return_value = {"error": {"message": "No endpoints found matching your data policy."}}
+        responses.insert(2, no_endpoint)
+        with patch("app.providers.openrouter_answers.requests.post", side_effect=responses) as transport:
+            reply = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1", "question": "Alpha?"})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        data = reply.json()
+        self.assertEqual(data["verification_status"], "verified")
+        self.assertEqual([source["page_number"] for source in data["sources"]], [1])
+        self.assertEqual(search.queries, [])
+        self.assertEqual([call.kwargs["json"]["model"] for call in transport.call_args_list],
+                         [VERIFICATION_MODEL, FAST_MODEL, GENERATION_MODEL, PDF_FALLBACK_MODEL, FAST_MODEL])
+        self.assertNotIn("Bob's alpha secret", repr(transport.call_args_list))
+        saved = self.client.app.state.conversation_repository.items[data["conversation_id"]]["messages"][0]
+        quality = saved["quality_evaluations"][0]
+        self.assertTrue(quality["evaluator_version"])
+        self.assertEqual([call["role"] for call in quality["model_calls"]],
+                         ["evidence_assessment", "structured_output_fallback", "research_generation", "fast_generation",
+                          "claim_verification", "structured_output_fallback"])
+        self.assertTrue(all(call["provider"] == "openrouter" and call["latency_ms"] >= 0
+                            for call in quality["model_calls"]))
+
+    def test_both_upstream_pools_throttled_returns_retrieved_passages_for_retry(self):
+        budget = Mock()
+        self.client.app.state.answer_provider = OpenRouterAnswerProvider("test-key", ModelRouter(), budget=budget)
+        limited = Mock(status_code=429, headers={})
+        limited.json.return_value = {"error": {"metadata": {"limit_source": "upstream_provider_shared_pool"}}}
+        with patch("app.providers.openrouter_answers.requests.post", return_value=limited) as post:
+            response = self.client.post("/api/v1/research/ask",
+                                        json={"paper_id": "paper-1", "question": "Alpha?", "limit": 1})
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["retry-after"], "60")
+        self.assertEqual(response.headers["cache-control"], "private, no-store")
+        detail = response.json()["detail"]
+        self.assertEqual(detail["code"], "upstream_capacity")
+        self.assertEqual(detail["limit_source"], "upstream_provider_shared_pool")
+        self.assertEqual(detail["paper_id"], "paper-1")
+        self.assertEqual([item["text"] for item in detail["passages"]], ["Alpha result"])
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(self.client.app.state.conversation_repository.items, {})
+
+    def test_local_daily_budget_blocks_assessment_without_provider_call(self):
+        budget = Mock()
+        budget.reserve.side_effect = AnswerRateLimitError("78827", limit_source="local_daily_budget")
+        self.client.app.state.answer_provider = OpenRouterAnswerProvider("test-key", ModelRouter(), budget=budget)
+        with patch("app.providers.openrouter_answers.requests.post") as post, \
+                self.assertLogs("uvicorn.error", level="WARNING") as logs:
+            response = self.client.post("/api/v1/research/ask",
+                                        json={"paper_id": "paper-1", "question": "Alpha?", "limit": 1})
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["retry-after"], "78827")
+        detail = response.json()["detail"]
+        self.assertEqual(detail["limit_source"], "local_daily_budget")
+        self.assertEqual(detail["paper_id"], "paper-1")
+        self.assertEqual([item["page_number"] for item in detail["passages"]], [1])
+        self.assertIn("stage=citewise_evidence_assessment", logs.output[0])
+        self.assertIn("limit_source=local_daily_budget", logs.output[0])
+        budget.reserve.assert_called_once()
+        self.assertEqual(budget.reserve.call_args.args, (VERIFICATION_MODEL,))
+        self.assertEqual(budget.reserve.call_args.kwargs["stage"], "citewise_evidence_assessment")
+        budget.dispatch.assert_not_called()
+        post.assert_not_called()
+
+    def test_throttled_assessor_followed_by_unusable_fallback_keeps_local_passages(self):
+        limited = Mock(status_code=429, headers={})
+        limited.json.return_value = {"error": {"metadata": {"limit_source": "upstream_provider_shared_pool"}}}
+        malformed = Mock(status_code=200)
+        malformed.json.return_value = {"choices": [{"message": {"content": '{"level":"sufficient"}'}}]}
+        for bad in (Timeout("private provider detail"), malformed):
+            with self.subTest(failure=type(bad).__name__):
+                self.client.app.state.answer_provider = OpenRouterAnswerProvider("test-key", ModelRouter())
+                with patch("app.providers.openrouter_answers.requests.post", side_effect=[limited, bad]) as post, \
+                        self.assertLogs("app.routers.research", level="WARNING") as logs:
+                    response = self.client.post("/api/v1/research/ask",
+                                                json={"paper_id": "paper-1", "question": "Alpha?", "limit": 1})
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(response.headers["cache-control"], "private, no-store")
+                detail = response.json()["detail"]
+                self.assertEqual(detail["code"], "provider_unavailable")
+                self.assertEqual(detail["paper_id"], "paper-1")
+                self.assertEqual([item["text"] for item in detail["passages"]], ["Alpha result"])
+                self.assertNotIn("private provider detail", response.text + str(logs.output))
+                self.assertIn(FAST_MODEL, str(logs.output))
+                self.assertEqual(post.call_count, 2)
+                self.assertEqual(self.client.app.state.conversation_repository.items, {})
+
+    def test_unbacked_fallback_quote_abstains_with_no_second_alternate_request(self):
+        self.client.app.state.answer_provider = OpenRouterAnswerProvider("test-key", ModelRouter())
+        limited = Mock(status_code=429, headers={})
+        limited.json.return_value = {"error": {"metadata": {"limit_source": "upstream_provider_shared_pool"}}}
+        fallback = Mock(status_code=200)
+        fallback.json.return_value = {"choices": [{"message": {"content": json.dumps({
+            "level": "sufficient", "chunk_ids": ["c0-hash-a"], "missing_information": "",
+            "supporting_quotes": [{"chunk_id": "c0-hash-a", "quote": "An invented quotation"}],
+        })}}]}
+        with patch("app.providers.openrouter_answers.requests.post", side_effect=[limited, fallback]) as post:
+            reply = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1", "question": "Alpha?"})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        self.assertEqual(reply.json()["status"], "insufficient_evidence")
+        self.assertEqual(reply.json()["sources"], [])
+        self.assertEqual(post.call_count, 2)
+
     def test_identical_question_and_evidence_reuses_validated_classification(self):
-        provider = GroqAnswerProvider("test-key", "test-model", 10)
+        provider = OpenRouterAnswerProvider("test-key", ModelRouter(timeout=10))
         self.client.app.state.answer_provider = provider
         first = EvidenceAssessment("sufficient", ["c0-hash-a"],
             supporting_quotes=[EvidenceQuote("c0-hash-a", "Alpha result")])
@@ -1042,7 +1400,7 @@ class ResearchTests(unittest.TestCase):
         self.assertTrue(all(reply.json()["search_trace"]["tavily_calls"] == 0 for reply in replies))
 
     def test_capabilities_preserve_same_key_cooldown_and_clear_changed_key(self):
-        provider = GroqAnswerProvider("first-test-key", "model", 10)
+        provider = OpenRouterAnswerProvider("first-test-key", ModelRouter(timeout=10))
         self.client.app.state.answer_provider = provider
         with patch.object(provider, "assess", side_effect=AnswerRateLimitError("90")):
             limited = self.client.post("/api/v1/research/ask", json={
@@ -1054,10 +1412,10 @@ class ResearchTests(unittest.TestCase):
         self.assertGreater(initial["retry_after_seconds"], 0)
         self.assertNotIn("key_revision", initial)
 
-        self.client.app.state.answer_provider = GroqAnswerProvider("first-test-key", "model", 10)
+        self.client.app.state.answer_provider = OpenRouterAnswerProvider("first-test-key", ModelRouter(timeout=10))
         restarted = self.client.get("/api/v1/research/capabilities").json()
         self.assertGreater(restarted["retry_after_seconds"], 0)
-        self.client.app.state.answer_provider = GroqAnswerProvider("second-test-key", "model", 10)
+        self.client.app.state.answer_provider = OpenRouterAnswerProvider("second-test-key", ModelRouter(timeout=10))
         changed = self.client.get("/api/v1/research/capabilities").json()
         self.assertEqual(changed["retry_after_seconds"], 0)
         self.assertNotIn("key_revision", changed)
@@ -1151,8 +1509,8 @@ class ResearchTests(unittest.TestCase):
         document_partial = self.client.post("/api/v1/research/ask", json=payload)
         self.assertEqual(document_partial.status_code, 200)
         self.assertEqual(document_partial.json()["status"], "partially_supported")
-        self.assertEqual(document_partial.json()["search_trace"]["tavily_calls"], 0)
-        self.assertEqual(search.queries, [])
+        self.assertEqual(document_partial.json()["search_trace"]["tavily_calls"], 1)
+        self.assertEqual(len(search.queries), 1)
         partial = self.client.post("/api/v1/research/ask", json={
             "paper_id": "paper-1", "question": "Compare Alpha with external research."})
         self.assertEqual(partial.status_code, 200)
@@ -1164,9 +1522,9 @@ class ResearchTests(unittest.TestCase):
             "tavily_calls": 1, "tavily_cache_hits": 0, "queries": [search.queries[-1]], "failures": 0,
             "duplicate_requests": 0, "retrieved_source_counts": [1], "rejected_irrelevant_sources": 0,
             "claim_status_counts": {"supported": 2}, "verification_failures": 0,
-            "groq_calls": 0, "groq_cache_hits": 0, "groq_attempts": 0, "groq_retries": 0, "groq_failures": 0,
-            "groq_rate_limits": 0, "groq_server_errors": 0, "groq_network_errors": 0,
-            "groq_rate_limit_kind": None, "raw_external_results": 0, "invalid_external_results": 0,
+            "openrouter_calls": 0, "openrouter_cache_hits": 0, "openrouter_attempts": 0, "openrouter_retries": 0, "openrouter_failures": 0,
+            "openrouter_rate_limits": 0, "openrouter_server_errors": 0, "openrouter_network_errors": 0,
+            "openrouter_rate_limit_kind": None, "raw_external_results": 0, "invalid_external_results": 0,
             "invalid_external_urls": 0, "rejected_external_domains": 0,
             "duplicate_external_sources": 0, "accepted_external_sources": 1,
             "fallback_searches": 0, "external_search_errors": 0, "external_search_timeouts": 0})
@@ -1176,13 +1534,15 @@ class ResearchTests(unittest.TestCase):
         provider.assessment = EvidenceAssessment("partial", ["unknown"], "Beta details")
         count = len(search.queries)
         invalid = self.client.post("/api/v1/research/ask", json=payload)
-        self.assertEqual(invalid.status_code, 502)
+        self.assertEqual(invalid.status_code, 200)
+        self.assertEqual(invalid.json()["status"], "insufficient_evidence")
         self.assertEqual(len(search.queries), count)
 
         provider.assessment = EvidenceAssessment("partial", ["c0-hash-a"], "Beta details",
             [EvidenceQuote("c0-hash-a", "Invented result")])
         invalid_quote = self.client.post("/api/v1/research/ask", json=payload)
-        self.assertEqual(invalid_quote.status_code, 502)
+        self.assertEqual(invalid_quote.status_code, 200)
+        self.assertEqual(invalid_quote.json()["status"], "insufficient_evidence")
         self.assertEqual(len(search.queries), count)
 
         provider.assessment = EvidenceAssessment("none", [])
@@ -1190,15 +1550,16 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(none.status_code, 200)
         self.assertEqual(none.json()["assessment"]["level"], "none")
         self.assertEqual(none.json()["sources"], [])
-        self.assertTrue(none.json()["external_sources"])
-        self.assertEqual(provider.external_calls, 1)
-        self.assertIn("do not establish a complete", none.json()["answer"])
+        self.assertEqual(none.json()["external_sources"], [])
+        self.assertEqual(none.json()["status"], "insufficient_evidence")
+        self.assertEqual(provider.external_calls, 3)
+        self.assertIn("external sources", none.json()["answer"])
         self.assertEqual(none.json()["search_trace"]["tavily_calls"], 1)
 
         specific = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1",
             "question": "What was the p-value of the study?"})
         self.assertEqual(specific.status_code, 200)
-        self.assertIn("do not report that value", specific.json()["answer"])
+        self.assertIn("do not establish the requested statistic", specific.json()["answer"])
         self.assertEqual(len(search.queries), count + 1)
 
     def test_tavily_trace_distinguishes_fresh_request_from_cache_hit(self):
@@ -1242,6 +1603,148 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(trace["retrieved_source_counts"], [0, 1])
         self.assertEqual(trace["accepted_external_sources"], 1)
 
+    def test_empty_external_search_abstains_and_preserves_the_question(self):
+        self.client.app.state.answer_provider = AssessedAnswers(EvidenceAssessment("none", []))
+        self.client.app.state.external_search = TavilyExternalSearch("test-key")
+        empty = Mock(status_code=200)
+        empty.json.return_value = {"results": []}
+        question = "What happened after the intervention?"
+        with patch("app.providers.external_search.requests.post", return_value=empty) as post:
+            response = self.client.post("/api/v1/research/ask", json={
+                "paper_id": "paper-1", "question": question})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("no usable external evidence", response.json()["answer"])
+        self.assertEqual(response.json()["external_sources"], [])
+        self.assertLessEqual(post.call_count, 2)
+        saved = self.client.get(f"/api/v1/research/conversations/{response.json()['conversation_id']}")
+        self.assertEqual(saved.json()["messages"][0]["question"], question)
+
+    def test_disagreeing_external_sources_remain_separate_and_cited(self):
+        class DisagreeingSearch(ExternalSearch):
+            def search(self, query):
+                self.queries.append(query)
+                return [ExternalEvidence("ext1", "Effect change report A", "https://one.example.org/result",
+                                         "The effect increased by 10 units."),
+                        ExternalEvidence("ext2", "Effect change report B", "https://two.example.org/result",
+                                         "The effect decreased by 5 units.")]
+
+        class DisagreeingAnswers(AssessedAnswers):
+            def generate_with_external(self, question, pdf_evidence, external_evidence, missing_information):
+                return ExternalAnswer("No PDF evidence.",
+                    "One source reports the effect increased by 10 units [ext1]. "
+                    "Another reports the effect decreased by 5 units [ext2].", [], ["ext1", "ext2"])
+
+            def verify_claims(self, question, claims, evidence):
+                return [ClaimAssessment(item["id"], "supported", [ClaimQuote(
+                    "ext1" if "increased" in item["text"] else "ext2",
+                    "The effect increased by 10 units." if "increased" in item["text"]
+                    else "The effect decreased by 5 units.")], []) for item in claims]
+
+        self.client.app.state.answer_provider = DisagreeingAnswers(EvidenceAssessment("none", []))
+        self.client.app.state.external_search = DisagreeingSearch()
+        response = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "How did the effect change?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("increased", response.json()["answer"])
+        self.assertIn("decreased", response.json()["answer"])
+        self.assertEqual({item["url"] for item in response.json()["external_sources"]},
+                         {"https://one.example.org/result", "https://two.example.org/result"})
+
+    def test_external_verification_retry_reuses_search_and_generation(self):
+        class RateLimitedOnce(AssessedAnswers):
+            verification_calls = 0
+
+            def verify_claims(self, question, claims, evidence):
+                self.verification_calls += 1
+                if self.verification_calls == 1:
+                    raise AnswerRateLimitError("1")
+                return super().verify_claims(question, claims, evidence)
+
+        provider = RateLimitedOnce(EvidenceAssessment("none", []))
+        search = ExternalSearch()
+        self.client.app.state.answer_provider = provider
+        self.client.app.state.external_search = search
+        first = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "What does external research report?"})
+        self.assertEqual(first.status_code, 200)
+        draft = first.json()
+        self.assertEqual(draft["verification_status"], "unavailable")
+        self.assertEqual(len(search.queries), 1)
+        self.assertEqual(provider.external_calls, 1)
+        retried = self.client.post(f"/api/v1/research/conversations/{draft['conversation_id']}"
+                                   f"/messages/{draft['message_id']}/verify")
+        self.assertEqual(retried.status_code, 200)
+        self.assertEqual(retried.json()["verification_status"], "verified")
+        self.assertEqual(retried.json()["answer_state"], "VERIFIED")
+        self.assertEqual(len(search.queries), 1)
+        self.assertEqual(provider.external_calls, 1)
+        saved = self.client.get(f"/api/v1/research/conversations/{draft['conversation_id']}")
+        self.assertEqual(len(saved.json()["messages"]), 1)
+        self.assertEqual(saved.json()["messages"][0]["external_sources"][0]["id"], "ext1")
+        internal = self.client.app.state.conversation_repository.items[draft["conversation_id"]]["messages"][0]
+        self.assertEqual(next(item for item in internal["verification_checks"] if item["check_id"] == "AH3")["status"], "PASS")
+        self.assertEqual([item["revision"] for item in internal["quality_evaluations"]], [1, 2])
+        self.assertEqual(internal["quality_evaluations"][0]["state"], "UNAVAILABLE")
+        self.assertNotIn("quality_evaluations", saved.json()["messages"][0])
+
+    def test_web_background_is_withheld_and_promotion_remains_attributed_after_reload(self):
+        question = "Do independent external sources confirm lower winter energy use?"
+
+        class WebAnswers(AssessedAnswers):
+            def generate_with_external(self, question, pdf_evidence, external_evidence, missing_information):
+                self.external_calls += 1
+                return ExternalAnswer("", "Winter energy use varies with temperature [ext1]. "
+                                      "The heater cuts winter energy use [ext2].", [], ["ext1", "ext2"])
+
+            def verify_claims(self, question, claims, evidence):
+                by_id = {source.id: source for source in evidence}
+                self.source_context = by_id["ext2"].provenance
+                return [ClaimAssessment(item["id"], "supported",
+                    [ClaimQuote(source.id, source.text)], [],
+                    question_fit="irrelevant" if source.id == "ext1" else "direct",
+                    evidence_use="attribution_only" if source.id == "ext2" else "establishes_claim")
+                    for item in claims if (source := by_id[item["cited_ids"][0]])]
+
+        provider = WebAnswers(EvidenceAssessment("none", []))
+        self.client.app.state.answer_provider = provider
+        self.client.app.state.external_search = TavilyExternalSearch("test-key")
+        search = Mock()
+        search.json.return_value = {"results": [
+            {"title": "Winter energy use", "url": "https://energy.example.org/study",
+             "content": "Winter energy use varies with temperature."},
+            {"title": "Winter energy", "url": "https://manufacturer.example.com/announcement",
+             "content": "Our heater cuts winter energy use.", "publisher": "Heater manufacturer"},
+        ]}
+        with patch("app.providers.external_search.requests.post", return_value=search) as post:
+            result = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1", "question": question})
+        self.assertEqual(result.status_code, 200, result.text)
+        answer = result.json()
+        self.assertEqual(answer["status"], "partially_supported")
+        self.assertEqual(answer["answer_state"], "PARTIALLY_SUPPORTED")
+        self.assertEqual(answer["verification_status"], "not_verified")
+        self.assertNotIn("varies with temperature", answer["answer"])
+        self.assertIn("Independent confirmation was not established", answer["answer"])
+        self.assertEqual([item["id"] for item in answer["external_sources"]], ["ext2"])
+        self.assertEqual(provider.source_context["publisher"], "Heater manufacturer")
+        self.assertEqual(post.call_count, 1)
+        saved = self.client.get(f"/api/v1/research/conversations/{answer['conversation_id']}").json()["messages"][0]
+        for field in ("answer", "claims", "sources", "external_sources"):
+            self.assertEqual(saved[field], answer[field])
+
+    def test_external_verifier_error_returns_unverified_draft(self):
+        class UnavailableVerifier(AssessedAnswers):
+            def verify_claims(self, question, claims, evidence):
+                raise TimeoutError("verification provider unavailable")
+
+        self.client.app.state.answer_provider = UnavailableVerifier(EvidenceAssessment("none", []))
+        self.client.app.state.external_search = ExternalSearch()
+        result = self.client.post("/api/v1/research/ask", json={
+            "paper_id": "paper-1", "question": "What does external coastal research report?"})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["verification_status"], "unavailable")
+        self.assertEqual(result.json()["answer_state"], "VERIFICATION_UNAVAILABLE")
+        self.assertEqual(result.json()["claims"], [])
+
     def test_provider_failure_does_not_trigger_fallback_or_claim_absence(self):
         self.client.app.state.answer_provider = AssessedAnswers(EvidenceAssessment("none", []))
         self.client.app.state.external_search = TavilyExternalSearch("test-key")
@@ -1251,7 +1754,25 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
         self.assertEqual(response.json()["search_trace"]["external_search_timeouts"], 1)
         self.assertEqual(response.json()["search_trace"]["fallback_searches"], 0)
-        self.assertIn("does not establish that no external information exists", response.json()["answer"])
+        self.assertIn("External search timed out", response.json()["answer"])
+
+    def test_external_http_failures_are_distinguished_from_missing_evidence(self):
+        self.client.app.state.answer_provider = AssessedAnswers(EvidenceAssessment("none", []))
+        self.client.app.state.external_search = TavilyExternalSearch("test-key")
+        for code, expected in ((401, "authentication"), (403, "authentication"),
+                               (429, "rate limited"), (432, "quota"), (433, "quota"),
+                               (503, "provider is unavailable")):
+            with self.subTest(status=code):
+                provider_response = Mock(status_code=code)
+                provider_response.raise_for_status.side_effect = HTTPError(response=provider_response)
+                with patch("app.providers.external_search.requests.post", return_value=provider_response) as post:
+                    response = self.client.post("/api/v1/research/ask", json={
+                        "paper_id": "paper-1", "question": "What evidence supports this answer?"})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(post.call_count, 1)
+                self.assertIn(expected, response.json()["answer"])
+                self.assertEqual(response.json()["external_sources"], [])
+                self.assertEqual(response.json()["search_trace"]["external_search_errors"], 1)
 
     def test_sample_size_does_not_bypass_wrong_none_assessment(self):
         directory = tempfile.TemporaryDirectory()
@@ -1268,6 +1789,7 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["assessment"]["level"], "none")
         self.assertNotIn("412 students", response.json()["answer"])
+        self.assertEqual(response.json()["status"], "insufficient_evidence")
         self.assertEqual(search.queries, [])
 
     def test_sample_size_shortcut_does_not_omit_other_requested_facts(self):
@@ -1363,6 +1885,17 @@ class ResearchTests(unittest.TestCase):
             EvidenceQuote("c0", "Privacy concerns ... The rate was 12.5%")])
         self.assertIsNone(_validate_assessment(reversed_quote, "What was the rate?", {"c0": source}))
 
+    def test_assessment_does_not_erase_a_negative_sign(self):
+        source = AnswerSource(id="c0", chunk_index=0, page_number=1,
+            text="The temperature changed by −5 degrees during the experiment.",
+            content_hash="a", highlight_text="")
+        good = EvidenceAssessment("sufficient", ["c0"], supporting_quotes=[
+            EvidenceQuote("c0", "The temperature changed by -5 degrees during the experiment")])
+        wrong = EvidenceAssessment("sufficient", ["c0"], supporting_quotes=[
+            EvidenceQuote("c0", "The temperature changed by 5 degrees during the experiment")])
+        self.assertIsNotNone(_validate_assessment(good, "How did the temperature change?", {"c0": source}))
+        self.assertIsNone(_validate_assessment(wrong, "How did the temperature change?", {"c0": source}))
+
     def test_assessment_rejects_malformed_quote_without_crashing(self):
         source = AnswerSource(id="c0", chunk_index=0, page_number=2,
             text="Monitoring reduced misconduct among students.",
@@ -1407,15 +1940,71 @@ class ResearchTests(unittest.TestCase):
         with self.assertLogs("uvicorn.error", level="INFO") as logs:
             response = self.client.post("/api/v1/research/ask", json={
                 "paper_id": "paper-1", "question": "Private question", "request_id": "req-456"})
-        self.assertEqual(response.status_code, 502)
-        self.assertEqual(response.json()["detail"],
-                         "The PDF evidence assessment could not be validated. Try again later.")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "insufficient_evidence")
+        self.assertEqual(response.json()["sources"], [])
         rejected = [entry for entry in logs.output if "evidence_assessment_rejected" in entry]
         self.assertEqual(len(rejected), 1)
         self.assertIn("request_id=req-456 reason=unknown_source_id level=sufficient", rejected[0])
         self.assertIn("retrieved_sources=2 cited_source_ids=1 supporting_quotes=1", rejected[0])
         self.assertNotIn("Private question", "\n".join(logs.output))
         self.assertNotIn("Private invented quotation", "\n".join(logs.output))
+
+    def test_missing_assessment_quote_returns_safe_abstention_without_external_search(self):
+        provider = AssessedAnswers(EvidenceAssessment("sufficient", ["c0-hash-a"],
+            supporting_quotes=[EvidenceQuote("c0-hash-a", "An invented attendance requirement of 85 percent")]))
+        external = ExternalSearch()
+        self.client.app.state.answer_provider = provider
+        self.client.app.state.external_search = external
+        with self.assertLogs("uvicorn.error", level="INFO") as logs:
+            response = self.client.post("/api/v1/research/ask", json={
+                "paper_id": "paper-1", "question": "What is the attendance requirement?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "insufficient_evidence")
+        self.assertEqual(response.json()["sources"], [])
+        self.assertNotIn("85", response.json()["answer"])
+        self.assertEqual(external.queries, [])
+        self.assertTrue(any("reason=quote_not_found_or_order_mismatch" in line for line in logs.output))
+        self.assertTrue(any("fragment_missing" in line for line in logs.output))
+
+    def test_assessment_recovery_uses_validated_original_passage_once(self):
+        class Recovered(AssessedAnswers):
+            calls = 0
+            def reassess(self, question, evidence):
+                self.calls += 1
+                return EvidenceAssessment("sufficient", ["c0-hash-a"],
+                    supporting_quotes=[EvidenceQuote("c0-hash-a", "Alpha result")])
+        provider = Recovered(EvidenceAssessment("sufficient", ["c0-hash-a"],
+            supporting_quotes=[EvidenceQuote("c0-hash-a", "An invented alpha result")]))
+        self.client.app.state.answer_provider = provider
+        response = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1", "question": "What is alpha?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "answered")
+        self.assertEqual(provider.calls, 1)
+
+    def test_assessment_recovery_rejects_a_second_invented_quote(self):
+        class Recovered(AssessedAnswers):
+            calls = 0
+            def reassess(self, question, evidence):
+                self.calls += 1
+                return EvidenceAssessment("sufficient", ["c0-hash-a"],
+                    supporting_quotes=[EvidenceQuote("c0-hash-a", "Another invented result")])
+        provider = Recovered(EvidenceAssessment("sufficient", ["c0-hash-a"],
+            supporting_quotes=[EvidenceQuote("c0-hash-a", "An invented alpha result")]))
+        self.client.app.state.answer_provider = provider
+        response = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1", "question": "What alpha result?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "insufficient_evidence")
+        self.assertEqual(response.json()["sources"], [])
+        self.assertEqual(provider.calls, 1)
+
+    def test_assessment_processing_bug_is_not_hidden_as_abstention(self):
+        self.client.app.state.answer_provider = AssessedAnswers(EvidenceAssessment(
+            "sufficient", ["c0-hash-a"], supporting_quotes=[EvidenceQuote("c0-hash-a", "Alpha result")]))
+        with patch("app.routers.research._validate_assessment", side_effect=RuntimeError("private text")):
+            response = self.client.post("/api/v1/research/ask", json={"paper_id": "paper-1", "question": "Alpha?"})
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn("private text", response.text)
 
     def test_claim_review_logs_statuses_reasons_and_source_ids_without_content(self):
         first = AnswerSource(id="c0", chunk_index=0, page_number=1, content_hash="a",

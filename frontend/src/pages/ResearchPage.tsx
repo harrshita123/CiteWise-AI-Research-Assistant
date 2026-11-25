@@ -6,10 +6,10 @@ import WorkspaceIcon from "../components/WorkspaceIcon";
 import { alternativeQuestions, answerGenerationAvailable, askPaper, AskResult, followUpQuestions, getConversation, RecommendedQuestion, ResearchApiError, RetrievedPassage, SavedMessage, saveAnswerFeedback, searchPaper, starterQuestions, retryVerification } from "../services/researchApi";
 import { evidenceText } from "../utils/evidenceOutcome";
 import { matchesAnswerRequest } from "../utils/answerRequest";
-import { deadlineFromRetry, remainingSeconds } from "../utils/groqCooldown";
+import { deadlineFromRetry, formatRetryDuration, remainingSeconds } from "../utils/providerCooldown";
 import CitedAnswer from "../components/CitedAnswer";
 import type { ConversationState } from "../components/WorkspaceLayout";
-import { recommendationView } from "../utils/recommendations";
+import { recommendationView, researchQuestionMode } from "../utils/recommendations";
 
 function highlightedSource(text: string, excerpt: string) {
   const start = excerpt ? text.indexOf(excerpt) : -1;
@@ -47,7 +47,7 @@ function saveResearchDraft(userId: string, draft: ResearchDraft) {
 
 export default function ResearchPage() {
   const [params, setParams] = useSearchParams();
-  const { refreshConversations } = useOutletContext<ConversationState>();
+  const { refreshConversations, demoMode } = useOutletContext<ConversationState>();
   const [user, setUser] = useState<SignedInUser | null>(null);
   const [papers, setPapers] = useState<Paper[]>([]);
   const [paperId, setPaperId] = useState(params.get("paper") ?? "");
@@ -60,7 +60,11 @@ export default function ResearchPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
-  const [failedQuestion, setFailedQuestion] = useState<{ text: string; mode: "ask" | "search"; paperId: string; conversationId: string | null } | null>(null);
+  const [failedQuestion, setFailedQuestion] = useState<{
+    text: string; mode: "ask" | "search"; paperId: string; conversationId: string | null;
+    retrieved?: ResearchApiError["retrieved"];
+    rateLimitMessage?: string;
+  } | null>(null);
   const [expired, setExpired] = useState(false);
   const [error, setError] = useState("");
   const [retryUntil, setRetryUntil] = useState(0);
@@ -72,11 +76,13 @@ export default function ResearchPage() {
   const [recommendationLabel, setRecommendationLabel] = useState("Suggested questions");
   const [recommendationsLoading, setRecommendationsLoading] = useState(false);
   const [recommendationError, setRecommendationError] = useState(false);
+  const [suggestionLimitMessage, setSuggestionLimitMessage] = useState("");
   const [recommendationAttempt, setRecommendationAttempt] = useState(0);
   const [suggestionDeadline, setSuggestionDeadline] = useState(0);
   const [suggestionRemaining, setSuggestionRemaining] = useState(0);
   const [attempt, setAttempt] = useState(0);
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const retryScrollRef = useRef<number | null>(null);
   const openedFromRouteRef = useRef<string | null>(null);
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const paperSelectRef = useRef<HTMLSelectElement>(null);
@@ -87,12 +93,14 @@ export default function ResearchPage() {
   const suggestionRetryRef = useRef(false);
 
   function invalidateRequest() {
+    retryScrollRef.current = null;
     contextVersionRef.current += 1;
     recommendationVersionRef.current += 1;
     suggestionRetryRef.current = false;
     setRecommendations([]);
     setRecommendationsLoading(false);
     setRecommendationError(false);
+    setSuggestionLimitMessage("");
     setFailedQuestion(null);
     activeRequestRef.current = null;
     setPendingQuestion(null);
@@ -101,10 +109,6 @@ export default function ResearchPage() {
 
   useEffect(() => {
     let active = true;
-    try {
-      sessionStorage.removeItem("citewise-groq-key-revision");
-      sessionStorage.removeItem("citewise-groq-retry-until-v2");
-    } catch { /* Storage is optional. */ }
     const refreshCapability = () => {
       const version = ++capabilityVersionRef.current;
       void answerGenerationAvailable().then((capability) => {
@@ -113,7 +117,6 @@ export default function ResearchPage() {
         const deadline = deadlineFromRetry(capability.retryAfterSeconds);
         setRetryUntil(deadline);
         setRetryRemaining(remainingSeconds(deadline));
-        if (!deadline) setError((current) => current.includes("Try again in ") ? "" : current);
       }).catch(() => { /* Passage search remains available if capabilities cannot load. */ });
     };
     refreshCapability();
@@ -156,7 +159,7 @@ export default function ResearchPage() {
 
   useEffect(() => {
     const transcript = transcriptRef.current;
-    if (transcript) transcript.scrollTop = transcript.scrollHeight;
+    if (transcript) transcript.scrollTop = retryScrollRef.current ?? transcript.scrollHeight;
   }, [messages.length, conversationId, result, pendingQuestion]);
 
   useEffect(() => {
@@ -200,6 +203,7 @@ export default function ResearchPage() {
     const version = ++recommendationVersionRef.current;
     setRecommendations([]);
     setRecommendationError(false);
+    setSuggestionLimitMessage("");
     setRecommendationLabel(!conversationId ? "Suggested questions" : supported ? "Suggested follow-up questions" : "Questions this paper may answer");
     setRecommendationsLoading(true);
     const request = !conversationId ? starterQuestions(paperId) : supported && latest
@@ -210,8 +214,10 @@ export default function ResearchPage() {
     }).catch((caught: unknown) => {
       if (active && version === recommendationVersionRef.current) {
         setRecommendationError(true);
-        if (caught instanceof ResearchApiError && caught.status === 429 && caught.retryAfterSeconds)
-          setSuggestionDeadline(deadlineFromRetry(caught.retryAfterSeconds));
+        if (caught instanceof ResearchApiError && caught.status === 429) {
+          setSuggestionLimitMessage(caught.message);
+          if (caught.retryAfterSeconds) setSuggestionDeadline(deadlineFromRetry(caught.retryAfterSeconds));
+        }
       }
     }).finally(() => { if (active && version === recommendationVersionRef.current) { suggestionRetryRef.current = false; setRecommendationsLoading(false); } });
     return () => { active = false; suggestionRetryRef.current = false; };
@@ -238,6 +244,7 @@ export default function ResearchPage() {
 
   function selectPaper(nextPaperId: string) {
     if (nextPaperId === paperId) return;
+    retryScrollRef.current = null;
     invalidateRequest();
     if (user && paperId) saveResearchDraft(user.id, { paperId, result, answerResult, conversationId, messages });
     const draft = user ? readResearchDraft(user.id, nextPaperId) : null;
@@ -251,8 +258,9 @@ export default function ResearchPage() {
     setError("");
   }
 
-  async function submit(mode: "search" | "ask", questionText = question) {
+  async function submit(mode: "search" | "ask", questionText = question, preserveScroll = false) {
     if (!paperId || !questionText.trim() || activeRequestRef.current || (mode === "ask" && retryUntil > Date.now())) return;
+    retryScrollRef.current = preserveScroll ? transcriptRef.current?.scrollTop ?? null : null;
     const askedQuestion = questionText.trim();
     const selectedPaperId = paperId;
     const selectedConversationId = conversationId;
@@ -294,6 +302,7 @@ export default function ResearchPage() {
           id: answer.message_id ?? crypto.randomUUID(), question: askedQuestion, status: answer.status,
           answer: answer.answer, sources: answer.sources, external_sources: answer.external_sources,
           assessment: answer.assessment, claims: answer.claims, verification_status: answer.verification_status,
+          answer_state: answer.answer_state,
           retry_after_seconds: answer.retry_after_seconds, created_at: new Date().toISOString(),
         }]);
         void refreshConversations().catch(() => {});
@@ -308,7 +317,10 @@ export default function ResearchPage() {
       const verificationFailure = caught instanceof ResearchApiError && caught.message.includes("claim verification is temporarily unavailable");
       const retryable = !(caught instanceof ResearchApiError) || [429, 500, 502, 503, 504].includes(caught.status);
       if (retryable && !verificationFailure) {
-        setFailedQuestion({ text: askedQuestion, mode, paperId: selectedPaperId, conversationId: selectedConversationId });
+        const retrieved = caught instanceof ResearchApiError && caught.retrieved?.paperId === selectedPaperId
+          ? caught.retrieved : null;
+        setFailedQuestion({ text: askedQuestion, mode, paperId: selectedPaperId, conversationId: selectedConversationId,
+          retrieved, rateLimitMessage: caught instanceof ResearchApiError && caught.status === 429 ? caught.message : undefined });
         setQuestion("");
       } else {
         setQuestion(askedQuestion);
@@ -318,7 +330,9 @@ export default function ResearchPage() {
         setExpired(true);
       }
       if (caught instanceof ResearchApiError && caught.status === 429 && caught.retryAfterSeconds) {
-        setRetryUntil((current) => Math.max(current, deadlineFromRetry(caught.retryAfterSeconds)));
+        ++capabilityVersionRef.current;
+        const deadline = deadlineFromRetry(caught.retryAfterSeconds);
+        setRetryUntil((current) => Math.max(current, deadline));
       }
       setError(retryable && !verificationFailure ? "The request failed. Please try again." : caught instanceof Error ? caught.message : "Research could not finish.");
     } finally {
@@ -347,7 +361,7 @@ export default function ResearchPage() {
       if (caught instanceof ResearchApiError && caught.status === 429 && caught.retryAfterSeconds) {
         setRetryUntil(deadlineFromRetry(caught.retryAfterSeconds));
       }
-      setError("Verification is temporarily unavailable. Please try again.");
+      setError(caught instanceof ResearchApiError ? caught.message : "Claim verification is temporarily unavailable.");
     } finally {
       if (activeRequestRef.current === requestId) { activeRequestRef.current = null; setBusy(false); }
     }
@@ -379,7 +393,8 @@ export default function ResearchPage() {
       setQuestion("");
       setResult(null);
       setAnswerResult(latest ? { paper_id: saved.paper_id, conversation_id: saved.id, message_id: latest.id,
-        status: latest.status, answer: latest.answer, sources: latest.sources } : null);
+        status: latest.status, answer: latest.answer, sources: latest.sources,
+        external_sources: latest.external_sources } : null);
     } catch (caught) {
       if (contextVersionRef.current !== contextVersion) return;
       setConversationId(null); setMessages([]); setAnswerResult(null); setResult(null); setQuestion("");
@@ -408,12 +423,18 @@ export default function ResearchPage() {
   if (!user) return <main className="session-check"><p>{error}</p><button className="primary-button" onClick={() => { setLoading(true); setAttempt((value) => value + 1); }}>Try again</button></main>;
 
   const suggestionView = recommendationView({ loading: recommendationsLoading, error: recommendationError, count: recommendations.length });
+  const waitingForProvider = Boolean(failedQuestion?.retrieved);
+  const demoSample = papers.find((paper) => paper.id === paperId)?.publication_identity?.demo_sample === true;
+  const submitMode = researchQuestionMode({ demoMode, demoSample, canAnswer, retryRemaining });
+  const visiblePassages = failedQuestion?.retrieved ?? result;
 
   return <>
     <main className="paper-main research-main">
       <header className="research-header">
         <div><h1>Ask your paper</h1>
-          <p className="research-intro">Get a concise answer, then open its supporting passage when you need to verify it.</p></div>
+          <p className="research-intro">{demoMode
+            ? "Try a sample question on the PLOS ONE paper, or find passages in a PDF you upload."
+            : "Get a concise answer, then open its supporting passage when you need to verify it."}</p></div>
       </header>
       <div className="research-grid">
         <div className="research-content">
@@ -426,12 +447,24 @@ export default function ResearchPage() {
             <div className="research-message-list">{messages.map((message) => <article className="research-message" key={message.id}>
               <div className="research-message-question"><span>You</span><p>{message.question}</p></div>
               <div className="research-message-answer">
+                {!!message.external_sources?.length && <small>{demoMode ? "Sample External Research" : "Answer from external sources"}</small>}
+                {demoMode && <small>{message.claims?.length ? "Sample answer · Sample claim check" : "Sample response"}</small>}
+                {!demoMode && message.answer_state === "VERIFIED" && <small>Verified against cited evidence</small>}
+                {message.answer_state === "PARTIALLY_SUPPORTED" && <small>{message.status === "contradictory_evidence" ? "Conflicting evidence" : "Partially supported"}</small>}
+                {!demoMode && message.answer_state === "INSUFFICIENT_EVIDENCE" && <small>Insufficient evidence</small>}
                 {message.verification_status === "unavailable" && <div role="status">
-                  <p>Not verified — verification temporarily unavailable.</p>
-                  {retryRemaining > 0 && <p>Try again in {retryRemaining} seconds.</p>}
-                  <button type="button" disabled={busy || retryRemaining > 0} onClick={() => void verifyAgain(message)}><span aria-hidden="true">↻</span> Retry verification</button>
+                  <small>Claim verification is temporarily unavailable. This draft is not verified.</small>
+                  <button className="research-retry-icon" type="button" aria-label="Retry verification" title="Retry verification (answer not verified)" disabled={busy || retryRemaining > 0} onClick={() => void verifyAgain(message)}><WorkspaceIcon name="refresh" size={16} /></button>
                 </div>}
+                {demoMode && !!message.external_sources?.length && <p>{message.assessment?.missing_information}</p>}
                 <p><CitedAnswer text={evidenceText(message.status, message.answer)} sources={message.sources} externalSources={message.external_sources} sourcePrefix={`source-${message.id}`} detailsId={`sources-${message.id}`} /></p>
+                {demoMode && !!message.external_sources?.length && !!message.claims?.length &&
+                  <details className="answer-sources">
+                    <summary>Sample claim verification</summary>
+                    {message.claims.map((claim, index) => <p key={index}>
+                      <strong>{claim.status === "contradicted" ? "Disagreement" : "Supported attribution"}</strong> · {claim.explanation}
+                    </p>)}
+                  </details>}
                 {message.sources.length > 0 && <details className="answer-sources" id={`sources-${message.id}`}>
                   <summary><span className="sources-closed-label">Show</span><span className="sources-open-label">Hide</span> {message.verification_status === "unavailable" ? "retrieved" : "supporting"} {message.sources.length === 1 ? "passage" : "passages"}</summary>
                   <p className="research-source-help">{message.verification_status === "unavailable" ? "These passages have not yet been verified as supporting the answer." : "Check the highlighted text against the answer and original PDF."}</p>
@@ -440,7 +473,9 @@ export default function ResearchPage() {
                     <a href={`${paperFileUrl(paperId)}#page=${source.page_number}`} target="_blank" rel="noreferrer">Open original PDF ↗</a>
                   </article>)}
                 </details>}
-                {!!message.external_sources?.length && <div className="external-sources"><strong>External sources</strong><ul>{message.external_sources.map((source) => <li key={source.id}><a href={source.url} target="_blank" rel="noreferrer">[{source.id}] {source.title} ↗</a>{source.published_date && <small> · Search-reported date: {source.published_date}</small>}{source.excerpt && <details><summary>View source excerpt</summary><p>{source.excerpt}</p></details>}</li>)}</ul></div>}
+                {!!message.external_sources?.length && <div className="external-sources"><strong>External sources</strong><ul>{message.external_sources.map((source) => <li key={source.id}><a href={source.url} target="_blank" rel="noreferrer">[{source.id}] {source.title} ↗</a>{demoMode
+                  ? <small> · {[source.author, source.publisher, source.verified_publication_date].filter(Boolean).join(" · ")}</small>
+                  : source.published_date && <small> · Search-reported date: {source.published_date}</small>}{source.excerpt && <details><summary>View source excerpt</summary><p>{source.excerpt}</p></details>}</li>)}</ul></div>}
                 <div className="answer-feedback">
                   <div className="answer-feedback-actions">
                     <button type="button" title="Helpful" aria-label="Helpful" disabled={feedbackBusy === message.id} aria-pressed={message.feedback?.rating === "helpful"} onClick={() => void rateAnswer(message, "helpful")}><WorkspaceIcon name="thumbUp" size={16} /></button>
@@ -457,16 +492,20 @@ export default function ResearchPage() {
           </section>}
           {pendingQuestion && <div className="research-pending" role="status">
             <div className="research-message-question"><span>You</span><p>{pendingQuestion}</p></div>
-            <p className="research-pending-status">Searching your paper and preparing an answer…</p>
+            <p className="research-pending-status">Checking your paper and, if needed, external sources…</p>
           </div>}
           {failedQuestion && !pendingQuestion && <div className="research-pending">
             <div className="research-message-question"><span>You</span><p>{failedQuestion.text}</p></div>
+            {(waitingForProvider || failedQuestion.rateLimitMessage) && <p className="research-pending-status" role="status">
+              {failedQuestion.rateLimitMessage ?? "Answer generation is temporarily unavailable."}
+              {retryRemaining > 0 ? ` Retry available in ${formatRetryDuration(retryRemaining)}.` : ""}
+            </p>}
             <button className="research-retry-icon" type="button" aria-label="Retry answer" title="Retry answer" disabled={busy || retryRemaining > 0 || failedQuestion.paperId !== paperId || failedQuestion.conversationId !== conversationId}
-              onClick={() => void submit(failedQuestion.mode, failedQuestion.text)}><WorkspaceIcon name="refresh" size={16} /></button>
+              onClick={() => void submit(failedQuestion.mode, failedQuestion.text, true)}><WorkspaceIcon name="refresh" size={16} /></button>
           </div>}
-          {busy && !pendingQuestion && <p className="research-progress" role="status">Searching your paper…</p>}
+          {busy && !pendingQuestion && <p className="research-progress" role="status">Checking your paper and external sources if needed…</p>}
           {answerResult && messages.length === 0 && <section className="research-results research-answer-card" aria-live="polite">
-            <div className="research-result-heading"><span className="research-step">02</span><div><p className="label">From your paper</p><h2>Answer</h2></div></div>
+            <div className="research-result-heading"><span className="research-step">02</span><div><p className="label">{answerResult.external_sources?.length ? "External sources" : "From your paper"}</p><h2>Answer</h2></div></div>
             <p className="research-answer"><CitedAnswer text={evidenceText(answerResult.status, answerResult.answer)} sources={answerResult.sources} externalSources={answerResult.external_sources} sourcePrefix="fallback-source" detailsId="fallback-sources" /></p>
             {answerResult.sources.length > 0 && <details className="answer-sources" id="fallback-sources">
               <summary><span className="sources-closed-label">Show</span><span className="sources-open-label">Hide</span> supporting {answerResult.sources.length === 1 ? "passage" : "passages"}</summary>
@@ -479,29 +518,33 @@ export default function ResearchPage() {
             </details>}
             {!!answerResult.external_sources?.length && <div className="external-sources"><strong>External sources</strong><ul>{answerResult.external_sources.map((source) => <li key={source.id}><a href={source.url} target="_blank" rel="noreferrer">[{source.id}] {source.title} ↗</a>{source.published_date && <small> · Search-reported date: {source.published_date}</small>}{source.excerpt && <details><summary>View source excerpt</summary><p>{source.excerpt}</p></details>}</li>)}</ul></div>}
           </section>}
-          {result && <section className="research-results research-passages" aria-live="polite">
+          {visiblePassages && <section className="research-results research-passages" aria-live="polite">
             <div className="research-result-heading"><span className="research-step">02</span><div><p className="label">Search results</p><h2>Relevant passages</h2></div></div>
-            <p>Most relevant passages first. Open the original page to verify the context.</p>
-            {result.passages.length === 0 ? <p>No saved passages were found for this paper.</p> : result.passages.map((passage, index) => <article className={`paper-chunk${index === 0 ? " research-top-passage" : ""}`} key={passage.chunk_index}>
+            <p>{waitingForProvider ? "These PDF passages were retrieved for your question. No answer was generated."
+              : "Most relevant passages first. Open the original page to verify the context."}</p>
+            {visiblePassages.passages.length === 0 ? <p>No saved passages were found for this paper.</p> : visiblePassages.passages.map((passage, index) => <article className={`paper-chunk${index === 0 ? " research-top-passage" : ""}`} key={passage.chunk_index}>
               <h3>Page {passage.page_number}{index === 0 && <span>Best match</span>}</h3><p>{highlightedSource(passage.text, passage.highlight_text ?? "")}</p>
-              <a href={`${paperFileUrl(result.paperId)}#page=${passage.page_number}`} target="_blank" rel="noreferrer">Open page {passage.page_number} in original PDF ↗</a>
+              <a href={`${paperFileUrl(visiblePassages.paperId)}#page=${passage.page_number}`} target="_blank" rel="noreferrer">Open page {passage.page_number} in original PDF ↗</a>
             </article>)}
           </section>}
           {paperId && !busy && !failedQuestion && suggestionView !== "hidden" && <section className="question-recommendations" aria-live="polite">
-            <div><h2>{recommendationLabel}</h2>{recommendationsLoading && <span>Finding useful questions…</span>}</div>
+            <div><h2>{demoMode ? "Suggested research questions" : recommendationLabel}</h2>{recommendationsLoading && <span>Finding useful questions…</span>}</div>
+            {demoMode && !demoSample && recommendations.length > 0 &&
+              <small>Choose a question to find supporting passages in this PDF.</small>}
+            {suggestionView === "error" && suggestionLimitMessage && <small role="status">{suggestionLimitMessage}</small>}
             {suggestionView === "error" && <button className="question-recommendation-retry" type="button" aria-label="Retry suggestions" title="Retry suggestions" disabled={recommendationsLoading || suggestionRemaining > 0} onClick={() => {
               if (suggestionRetryRef.current || suggestionDeadline > Date.now()) return;
               suggestionRetryRef.current = true;
               setRecommendationAttempt((value) => value + 1);
             }}><WorkspaceIcon name="refresh" size={16} /></button>}
-            {recommendations.length > 0 && <div className="question-recommendation-list">{recommendations.map((item) => <button key={item.id} type="button" disabled={busy || (canAnswer && retryRemaining > 0)} onClick={() => {
-              void submit(canAnswer ? "ask" : "search", item.text);
-            }}>{item.text}</button>)}</div>}
+            {recommendations.length > 0 && <div className="question-recommendation-list">{recommendations.map((item) => <button key={item.id} type="button" disabled={busy} onClick={() => {
+              void submit(submitMode, item.text);
+            }}>{item.recommendation_type === "sample_external" ? `External sample · ${item.text}` : item.text}</button>)}</div>}
           </section>}
           </div>
-          <form className="research-form research-composer" aria-label="Ask your paper" onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void submit(canAnswer ? "ask" : "search"); }}>
+          <form className="research-form research-composer" aria-label="Ask your paper" onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void submit(submitMode); }}>
             {error && !failedQuestion && <p className="form-error" role="alert">{error}</p>}
-            {!error && retryRemaining > 0 && <p className="form-error" role="status">Answer generation is rate limited. Try again in {Math.ceil(retryRemaining / 60)} min.</p>}
+            {!failedQuestion && retryRemaining > 0 && <p className="form-error" role="status">Answer retry available in {formatRetryDuration(retryRemaining)}. You can still find passages.</p>}
             <div className="research-paper-tools">
               <select ref={paperSelectRef} aria-label="Select Library PDF" value={paperId} disabled={busy} onChange={(event) => { openedFromRouteRef.current = null; setParams(event.target.value ? { paper: event.target.value } : {}, { replace: true }); selectPaper(event.target.value); }}>
                 <option value="">Select a PDF from Library</option>
@@ -520,9 +563,9 @@ export default function ResearchPage() {
                   event.preventDefault(); setQuestion(messages.at(-1)!.question); return;
                 } if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                   event.preventDefault();
-                  if (paperId && question.trim() && !busy && (!canAnswer || retryRemaining === 0)) void submit(canAnswer ? "ask" : "search");
+                  if (paperId && question.trim() && !busy) void submit(submitMode);
                 } }} maxLength={1000} required rows={1} aria-label="Your question" aria-keyshortcuts="Enter ArrowUp" placeholder={paperId ? "Ask a question about this paper…" : "Select a Library PDF to ask a question…"} />
-              <button className="research-send-button" type="submit" title={canAnswer ? "Send question" : "Find passages"} aria-label={canAnswer ? "Send question" : "Find passages"} disabled={busy || !paperId || !question.trim() || (canAnswer && retryRemaining > 0)}><WorkspaceIcon name="arrowUp" size={19} /></button>
+              <button className="research-send-button" type="submit" title={submitMode === "ask" ? "Send question" : "Find passages"} aria-label={submitMode === "ask" ? "Send question" : "Find passages"} disabled={busy || !paperId || !question.trim()}><WorkspaceIcon name="arrowUp" size={19} /></button>
             </div>
           </form>
         </div>

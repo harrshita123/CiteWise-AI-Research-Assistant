@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deadlineFromRetry, remainingSeconds } from "../src/utils/groqCooldown.js";
+import { deadlineFromRetry, formatRetryDuration, remainingSeconds } from "../src/utils/providerCooldown.js";
 
 test("a successful answer clears an active retry deadline", () => {
   const active = deadlineFromRetry(90, 1000);
@@ -24,4 +24,11 @@ test("an unchanged key retains its active provider retry time after refresh", ()
 test("missing retry timing never creates an invented countdown", () => {
   assert.equal(deadlineFromRetry(null, 1000), 0);
   assert.equal(deadlineFromRetry(Number.NaN, 1000), 0);
+});
+
+test("provider cooldowns and long quota resets use readable durations", () => {
+  assert.equal(formatRetryDuration(42), "42 s");
+  assert.equal(formatRetryDuration(78827), "21 h 54 min");
+  assert.equal(formatRetryDuration(86401), "1 d 1 min");
+  assert.equal(formatRetryDuration(remainingSeconds(deadlineFromRetry(42, 1000), 43000)), "");
 });

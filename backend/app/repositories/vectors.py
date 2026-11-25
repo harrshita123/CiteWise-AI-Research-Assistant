@@ -26,6 +26,7 @@ class VectorRepository:
                 "owner_id": owner_id, "paper_id": paper_id,
                 "page_number": chunk.page_number, "chunk_index": chunk.chunk_index,
                 "content_hash": chunk.content_hash,
+                **({"section": chunk.section} if chunk.section else {}),
             } for chunk in chunks],
         )
 
@@ -95,6 +96,7 @@ class VectorRepository:
         metadatas = result["metadatas"][0] if result["metadatas"] else []
         passages = [ChunkResponse(text=text, **metadata)
                     for text, metadata in zip(documents, metadatas)]
+        dense_neighbors = passages[:limit + 1]
         if question:
             question_terms = self._terms(question)
             if question_terms:
@@ -176,7 +178,19 @@ class VectorRepository:
                                    len(selected) - 1)
                     selected[replace] = candidate
             return list({item.chunk_index: item for item in selected}.values())
-        return passages[:limit]
+        selected = passages[:limit]
+        if (question and limit > 1 and len(dense_neighbors) > limit and len(selected) == limit
+                and selected[0] == dense_neighbors[0]
+                and re.search(r"\b(?:and|then)\s+(?:what|how|which|why|when|where|did|does|do|was|were)\b", question, re.I)):
+            # Keep one adjacent continuation of the strongest match if it was
+            # already near the dense cutoff. A second clause can be paraphrased
+            # on the continuation and score poorly on exact question words.
+            anchor = selected[0]
+            for neighbor in dense_neighbors[1:]:
+                if (abs(neighbor.chunk_index - anchor.chunk_index) == 1 and neighbor.page_number == anchor.page_number
+                        and all(neighbor.content_hash != item.content_hash for item in selected)):
+                    return [*selected[:-1], neighbor]
+        return selected
 
     def remove(self, owner_id: str, paper_id: str) -> None:
         self.collection.delete(where=self.paper_filter(owner_id, paper_id))

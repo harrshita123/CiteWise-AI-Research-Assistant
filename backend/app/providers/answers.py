@@ -12,6 +12,7 @@ EvidenceStatus = Literal[
 class Evidence:
     id: str
     text: str
+    provenance: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,14 @@ class ExternalEvidence:
     publisher: str | None = None
     author: str | None = None
 
+    def provenance(self) -> dict[str, str]:
+        return {key: value for key, value in {
+            "origin": "web", "title": self.title, "url": self.url,
+            "publisher": self.publisher, "author": self.author,
+            "source_reported_date": self.published_date,
+            "verified_publication_date": self.verified_publication_date,
+        }.items() if value}
+
 
 @dataclass(frozen=True)
 class ExternalAnswer:
@@ -68,11 +77,22 @@ class ClaimAssessment:
     supporting: list[ClaimQuote]
     opposing: list[ClaimQuote]
     explanation: str = ""
+    question_fit: Literal["direct", "partial", "irrelevant"] = "direct"
+    evidence_use: Literal["establishes_claim", "attribution_only", "insufficient"] = "establishes_claim"
+    scope_preserved: bool = True
+    unsupported_source_ids: tuple[str, ...] = ()
+
+
+class ClaimReviewBatch(list[ClaimAssessment]):
+    def __init__(self, assessments, requirements):
+        super().__init__(assessments)
+        self.requirements = requirements
 
 
 class AnswerRateLimitError(Exception):
-    def __init__(self, retry_after: str | None = None):
+    def __init__(self, retry_after: str | None = None, *, limit_source: str = "unknown"):
         self.retry_after = retry_after
+        self.limit_source = limit_source
         super().__init__("Answer provider rate limit reached.")
 
 

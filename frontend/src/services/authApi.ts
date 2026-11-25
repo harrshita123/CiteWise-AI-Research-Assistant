@@ -66,6 +66,15 @@ export function getCurrentUser() {
   return request<SignedInUser>("/api/v1/auth/me");
 }
 
+export async function getDemoMode() {
+  const info = await request<{ demo_mode: boolean }>("/api/v1/auth/demo");
+  return info.demo_mode === true;
+}
+
+export function enterDemo() {
+  return request<AuthenticationResponse & { paper_id: string }>("/api/v1/auth/demo", { method: "POST" });
+}
+
 export function getAdminUsers() {
   return request<SignedInUser[]>("/api/v1/admin/users");
 }

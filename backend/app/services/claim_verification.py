@@ -23,6 +23,7 @@ _NUMERIC_CITATION = re.compile(
 )
 _FACT_VERB = r"(?:used|employed|included|enrolled|involved|comprised|was conducted|was carried out|lasted|spanned)"
 _CLAUSE_VERB = r"(?:is|are|was|were|has|have|had|do|does|did|can|could|found|reported|observed|showed|concluded|suggested|indicated|demonstrated|proved|caused|improved|reduced|increased|decreased|remained)"
+_NONEMPIRICAL = re.compile(r"\b(?:hypothetical|illustrative|synthetic|simulat(?:ion|ed|ions)|fictional)\b", re.I)
 logger = logging.getLogger(__name__)
 
 
@@ -106,9 +107,14 @@ def _verbatim(quote: ClaimQuote, evidence: dict[str, Evidence]) -> bool:
     source = evidence.get(quote.source_id)
     if source is None or len(quote.quote.strip()) < 8:
         return False
-    normalize = lambda text: " ".join(re.findall(r"\d[\d,]*(?:\.\d+)?|[^\W\d_]+|%",
-                                                  unicodedata.normalize("NFKC", text).casefold()))
+    normalize = lambda text: " ".join(re.findall(r"(?<!\w)-?\d[\d,]*(?:\.\d+)?|[^\W\d_]+|[%<>≤≥=±]",
+                                                  unicodedata.normalize("NFKC", text).casefold().replace("−", "-")))
     source_text = f" {normalize(source.text)} "
+    if source.provenance and source.provenance.get("origin") == "web":
+        # Web snippets can already be truncated. Never let another ellipsis
+        # splice a result to a qualification from elsewhere in that snippet.
+        if re.search(r"\.\.\.|…", quote.quote):
+            return False
     cursor = 0
     for part in re.split(r"\s*(?:\.\.\.|…)+\s*", quote.quote):
         if not part.strip():
@@ -127,8 +133,8 @@ def _numbers_supported(claim: str, quotes: list[ClaimQuote]) -> bool:
         return abs(actual - stated) <= 0.5 * 10 ** (-decimals) + 1e-9
 
     numbers = lambda text: [float(value.replace(",", "")) for value in
-                            re.findall(r"(?<![\w])\d[\d,]*(?:\.\d+)?", text)]
-    numeric_claim = _NUMERIC_CITATION.sub("", claim)
+                            re.findall(r"(?<![\w])-?\d[\d,]*(?:\.\d+)?", text.replace("−", "-"))]
+    numeric_claim = _NUMERIC_CITATION.sub("", claim).replace("−", "-")
     claimed = numbers(numeric_claim)
     cited_text = " ".join(_NUMERIC_CITATION.sub("", item.quote) for item in quotes)
     cited = numbers(cited_text)
@@ -137,12 +143,17 @@ def _numbers_supported(claim: str, quotes: list[ClaimQuote]) -> bool:
     cited.extend(value for word, value in words.items()
                  if re.search(rf"\b{word}\b", cited_text, re.I))
     missing = [value for value in claimed if value not in cited]
+    percent = r"(?<!\w)(-?\d[\d,]*(?:\.\d+)?)\s*(?:%|percent\b|per cent\b)"
+    cited_rates = set(numbers(" ".join(re.findall(percent, cited_text, re.I))))
+    if any(value not in cited_rates and value not in missing
+           for value in numbers(" ".join(re.findall(percent, numeric_claim, re.I)))):
+        return False
     if not missing:
         return True
     if len(missing) != 1 or len(cited) < 2:
         return False
     value = missing[0]
-    value_text = next((number for number in re.findall(r"(?<![\w])\d[\d,]*(?:\.\d+)?", numeric_claim)
+    value_text = next((number for number in re.findall(r"(?<![\w])-?\d[\d,]*(?:\.\d+)?", numeric_claim)
                        if float(number.replace(",", "")) == value), "")
     decimals = len(value_text.partition(".")[2])
     if re.search(r"\b(?:combined|total|together|sum)\b", claim, re.I):
@@ -391,13 +402,17 @@ def review_claims(claims: list[Claim], proposed: list[ClaimAssessment],
         legal_scope_match = _legal_scope_supported(claim.text, support) if item.status == "supported" else True
         inference_scope_match = _inference_scope_supported(claim.text, support) if item.status == "supported" else True
         partial_relevance_match = (_relevant_partial_support(claim.text, support)
-                                   if item.status == "partially_supported" else True)
-        contradiction_match = not oppose or _explicit_opposition(support, oppose)
+                                   if item.status == "partially_supported" or
+                                   (claim.section == "external" and item.status == "supported") else True)
+        contradiction_match = not oppose or _explicit_opposition(
+            support or [ClaimQuote("", claim.text)], oppose)
+        fit_match = item.question_fit != "irrelevant" and (
+            item.evidence_use != "insufficient" or item.status == "contradicted")
         valid = (item.status in ("supported", "partially_supported", "unsupported", "contradicted")
                  and quote_match and source_match and numeric_match and legal_scope_match
-                 and inference_scope_match and partial_relevance_match and contradiction_match
+                 and inference_scope_match and partial_relevance_match and contradiction_match and fit_match
                  and all(quote.source_id not in {item.source_id for item in support} for quote in oppose)
-                 and (item.status == "unsupported" or bool(support))
+                 and (item.status in ("unsupported", "contradicted") or bool(support))
                  and (item.status != "contradicted" or bool(oppose))
                  and (item.status != "unsupported" or not (support or oppose)))
         if (item.status == "supported" and re.search(r"\bfalse positives?\b", claim.text, re.I)
@@ -409,6 +424,7 @@ def review_claims(claims: list[Claim], proposed: list[ClaimAssessment],
                        "legal_scope_mismatch" if not legal_scope_match else
                        "inference_scope_mismatch" if not inference_scope_match else
                        "irrelevant_supporting_quote" if not partial_relevance_match else
+                       "question_or_evidence_mismatch" if not fit_match else
                        "contradiction_mismatch" if not contradiction_match else
                        "missing_supporting_quote" if item.status != "unsupported" and not support else
                        "invalid_status_or_support")
@@ -424,7 +440,7 @@ def review_claims(claims: list[Claim], proposed: list[ClaimAssessment],
             reason = ("No citation was attached to the claim." if not claim.cited_ids else
                       "The proposed supporting quote was absent from the cited passage or did not cover the claim.")
             if (reason_code == "inference_scope_mismatch" and contradiction_match and not oppose
-                    and _relevant_partial_support(claim.text, support)):
+                    and fit_match and _relevant_partial_support(claim.text, support)):
                 result.append(ReviewedClaim(claim, "partially_supported", support, [],
                                             "The cited passage supports an observation but not the stronger conclusion.",
                                             reason_code))
@@ -432,6 +448,16 @@ def review_claims(claims: list[Claim], proposed: list[ClaimAssessment],
                 result.append(ReviewedClaim(claim, "unsupported", [], [], reason, reason_code))
             continue
         status: ClaimStatus = "contradicted" if oppose and support else item.status
+        if status == "supported":
+            if item.evidence_use == "attribution_only":
+                status, reason_code = "partially_supported", "attribution_only"
+            elif not item.scope_preserved or (not _NONEMPIRICAL.search(claim.text)
+                    and all(_NONEMPIRICAL.search(quote.quote) for quote in support)):
+                status, reason_code = "partially_supported", "scope_not_preserved"
+            elif item.question_fit == "partial":
+                status, reason_code = "partially_supported", "question_partly_addressed"
+        elif status == "partially_supported" and item.evidence_use == "attribution_only":
+            reason_code = "attribution_only"
         if (status == "supported" and claim.section == "external"
                 and re.search(r"\b(current|currently|today|latest|now)\b", claim.text, re.I)):
             dates = verified_dates or {}
@@ -451,11 +477,16 @@ def review_claims(claims: list[Claim], proposed: list[ClaimAssessment],
 
 
 def present_claims(reviews: list[ReviewedClaim], section: str) -> str:
+    section_reviews = [item for item in reviews if item.claim.section == section]
     parts = []
-    withheld = []
-    for item in reviews:
-        if item.claim.section != section:
-            continue
+    excerpt_refs: dict[str, tuple[str, dict[str, None]]] = {}
+    partial_reasons = set()
+    covered = {
+        (" ".join(quote.quote.split()), quote.source_id)
+        for item in section_reviews if item.status == "supported"
+        for quote in item.supporting
+    }
+    for item in section_reviews:
         refs = " ".join(f"[{source_id}]" for source_id in dict.fromkeys(
             quote.source_id for quote in item.supporting))
         display_text = re.sub(r"\s+([.,;:!?])", r"\1", _NUMERIC_CITATION.sub("", item.claim.text)).strip()
@@ -467,13 +498,26 @@ def present_claims(reviews: list[ReviewedClaim], section: str) -> str:
                 return f'{origin} [{quote.source_id}] reports: "{quote.quote}"'
             supporting = " ".join(finding(quote) for quote in item.supporting)
             opposing = " ".join(finding(quote) for quote in item.opposing)
-            parts.append(f"The cited findings differ. {supporting} {opposing} The evidence does not resolve the disagreement.")
+            if supporting:
+                parts.append(f"The cited findings differ. {supporting} {opposing} The evidence does not resolve the disagreement.")
+            else:
+                parts.append(f"The cited passage contradicts the proposed claim. {opposing}")
         elif item.status == "partially_supported":
-            excerpts = " ".join(f'"{quote.quote}"' for quote in item.supporting)
-            parts.append(f"The evidence only partly addresses this claim. Verified passage: {excerpts} {refs} "
-                         "The remaining detail could not be verified.".strip())
-        else:
-            withheld.append(item.claim.text)
-    if withheld and not parts:
+            partial_reasons.add(item.reason_code)
+            for quote in item.supporting:
+                normalized = " ".join(quote.quote.split())
+                if (normalized, quote.source_id) not in covered:
+                    _, source_ids = excerpt_refs.setdefault(normalized, (quote.quote, {}))
+                    source_ids[quote.source_id] = None
+    if excerpt_refs:
+        excerpts = [" ".join([f'"{quote}"', *(f"[{source}]" for source in sources)])
+                    for quote, sources in excerpt_refs.values()]
+        parts.append(f"The cited evidence also reports {', '.join(excerpts)}." if parts
+                     else f"The cited evidence reports {', '.join(excerpts)}.")
+    if "attribution_only" in partial_reasons:
+        parts.append("Independent confirmation was not established.")
+    if partial_reasons - {"attribution_only"}:
+        parts.append("The cited evidence supports only part of the requested conclusion.")
+    if section_reviews and not parts:
         parts.append("The cited evidence does not establish a reliable answer to this question.")
     return " ".join(parts)

@@ -7,6 +7,7 @@ from time import time
 import cloudinary
 import cloudinary.uploader
 import cloudinary.utils
+import requests
 
 from ..config import Settings
 
@@ -20,8 +21,16 @@ class LocalPdfStorage:
     def path(self, paper_id: str) -> Path:
         return self.directory / f"{paper_id}.pdf"
 
+    def save(self, paper_id: str, content: bytes) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.path(paper_id).write_bytes(content)
+
     def delete(self, paper_id: str) -> None:
         self.path(paper_id).unlink(missing_ok=True)
+
+    def read(self, paper_id: str, limit: int) -> bytes:
+        with self.path(paper_id).open("rb") as source:
+            return source.read(limit + 1)
 
 
 class CloudinaryPdfStorage:
@@ -64,3 +73,14 @@ class CloudinaryPdfStorage:
             self.public_id(paper_id), "pdf", resource_type="image",
             type="authenticated", expires_at=int(time()) + 60,
         )
+
+    def read(self, paper_id: str, limit: int) -> bytes:
+        content = bytearray()
+        with requests.get(self.view_url(paper_id), timeout=(5, 15), stream=True, allow_redirects=False) as response:
+            if response.status_code != 200:
+                raise OSError("Stored PDF could not be downloaded.")
+            for block in response.iter_content(65536):
+                content.extend(block)
+                if len(content) > limit:
+                    raise ValueError("Stored PDF exceeds the size limit.")
+        return bytes(content)

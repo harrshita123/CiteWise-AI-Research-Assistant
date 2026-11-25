@@ -1,7 +1,7 @@
 import asyncio
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -50,6 +50,10 @@ class FakeEmbeddings:
 class MemoryPapers:
     def __init__(self):
         self.papers = {}
+        self.rejections = []
+
+    async def record_rejection(self, owner_id, checks):
+        self.rejections.append((owner_id, checks))
 
     async def create(self, paper):
         if any(saved["owner_id"] == paper["owner_id"] and saved["file_hash"] == paper["file_hash"]
@@ -78,6 +82,46 @@ class MemoryPapers:
     async def remove(self, owner_id, paper_id):
         if await self.find(owner_id, paper_id):
             del self.papers[paper_id]
+
+    async def mark_nonresearch(self, paper, category):
+        saved = await self.find(paper["owner_id"], paper["_id"])
+        if not saved or saved["status"] != "ready" or saved.get("document_type"):
+            return None
+        saved.update(status="not_research", document_type="not_research_paper", document_category=category)
+        saved.pop("publication_identity", None)
+        return saved
+
+    async def claim_identity_job(self):
+        for paper in self.papers.values():
+            if paper["status"] == "ready" and paper.get("publication_identity", {}).get("status") == "pending":
+                attempts = paper["publication_identity"].get("attempts", 0) + 1
+                paper["publication_identity"] = {**paper["publication_identity"], "status": "checking", "lease_token": "test", "attempts": attempts}
+                return paper.copy()
+        return None
+
+    async def finish_identity_job(self, paper, identity, *, identity_input=None):
+        saved = await self.find(paper["owner_id"], paper["_id"])
+        if saved and saved.get("file_hash") == paper["file_hash"] and saved["publication_identity"].get("lease_token") == paper["publication_identity"]["lease_token"]:
+            saved["publication_identity"] = identity
+            if identity_input is not None:
+                saved["identity_input"] = identity_input
+            return True
+        return False
+
+    async def retry_identity_job(self, owner_id, paper_id):
+        paper = await self.find(owner_id, paper_id)
+        if paper and "identity_input" in paper and paper["publication_identity"]["status"] in {"verification_unavailable", "not_verified", "conflicting", "registry_record"}:
+            paper["publication_identity"] = {"status": "pending", "refresh_extraction": True}
+            return True
+        return False
+
+    async def backfill_identity_job(self, owner_id, paper_id, file_hash):
+        paper = await self.find(owner_id, paper_id)
+        if paper and paper.get("file_hash") == file_hash and "identity_input" not in paper and not paper.get("publication_identity"):
+            paper["identity_input"] = {}
+            paper["publication_identity"] = {"status": "pending", "refresh_extraction": True}
+            return True
+        return False
 
 
 class PdfProcessingTests(unittest.TestCase):
@@ -125,6 +169,39 @@ class PdfProcessingTests(unittest.TestCase):
         self.assertEqual(chunks[-1].page_number, 4)
         self.assertTrue(all(len(tokenizer.encode(chunk.text).ids) <= 220 for chunk in chunks))
         self.assertEqual([chunk.chunk_index for chunk in chunks], list(range(len(chunks))))
+
+    def test_layout_headings_split_sections_without_fixed_heading_names(self):
+        with pymupdf.open() as document:
+            page = document.new_page(width=600, height=800)
+            page.insert_text((40, 120), "1 Unfamiliar topic", fontsize=16)
+            page.insert_text((40, 145), "Evidence includes a value of 42 and a useful qualification.", fontsize=10)
+            page.insert_text((40, 200), "2 Another unusual heading", fontsize=16)
+            page.insert_text((40, 225), "Independent evidence contains a different value of 15.", fontsize=10)
+            content = document.tobytes()
+        _, pages = extract_pages(content, 300, 10000)
+        chunks = create_chunks(pages, test_tokenizer())
+        self.assertEqual([chunk.section for chunk in chunks], ["1 Unfamiliar topic", "2 Another unusual heading"])
+        self.assertIn("42", chunks[0].text)
+        self.assertIn("15", chunks[1].text)
+        self.assertTrue(all(chunk.page_number == 1 for chunk in chunks))
+
+    def test_chunking_without_headings_keeps_fallback_and_section_metadata_is_optional(self):
+        _, pages = extract_pages(make_pdf("Simple plain evidence without special typography."), 300, 10000)
+        chunks = create_chunks(pages, test_tokenizer())
+        self.assertEqual(len(chunks), 1)
+        self.assertIsNone(chunks[0].section)
+        self.assertIn("plain evidence", chunks[0].text)
+
+    def test_section_metadata_survives_index_and_old_chunks_still_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vectors = VectorRepository(Path(directory))
+            from app.services.pdf_processing import TextChunk
+            chunks = [TextChunk(0, 1, "Evidence under heading.", "first", "Unfamiliar heading"),
+                      TextChunk(1, 2, "Legacy-style evidence.", "second")]
+            vectors.save("alice", "paper", chunks, [[1.0, 0.0], [0.0, 1.0]])
+            loaded = vectors.preview("alice", "paper", 0, 2)
+            self.assertEqual([item.section for item in loaded], ["Unfamiliar heading", None])
+            self.assertEqual(vectors.preview("bob", "paper", 0, 2), [])
 
     def test_rejects_scanned_encrypted_and_over_limit_documents(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -178,7 +255,7 @@ class PaperApiTests(unittest.TestCase):
         settings_patch = patch("app.routers.papers.get_settings", return_value=self.settings)
         settings_patch.start()
         self.addCleanup(settings_patch.stop)
-        self.content = make_pdf("Research evidence on page one.", "Methods and results on page two.")
+        self.content = make_pdf("Abstract\nResearch evidence on page one.\nIntroduction\nContext.", "Methods\nMethods and results on page two.")
 
     def upload(self, content=None, filename="paper.pdf"):
         return self.client.post("/api/v1/papers", files={"file": (filename, content or self.content, "application/pdf")})
@@ -214,6 +291,265 @@ class PaperApiTests(unittest.TestCase):
         self.assertEqual(duplicate.status_code, 409)
         self.assertEqual(duplicate.json()["detail"], "This PDF is already in your library.")
         self.assertEqual(self.ingestion.vectors.collection.count(), 2)
+
+    def test_identity_check_stores_results_per_owned_paper(self):
+        from unittest.mock import Mock
+        discovery = Mock()
+        discovery.search.return_value = {"results": [{"title": "A Study of Unusual Materials",
+            "authors": ["Ada Miller"], "year": 2024, "venue": "Research Conference",
+            "status": "verified_published", "doi": "10.1234/example",
+            "sources": ["Crossref"], "landing_url": "https://doi.org/10.1234/example"}], "provider_errors": {}}
+        self.app.state.discovery_service = discovery
+        first = self.upload(make_pdf("A Study of Unusual Materials\nAda Miller\n10.1234/example\nAbstract\nA study.\nIntroduction\nMethods overview.\nMethods\nMeasurements."))
+        self.assertEqual(first.status_code, 201)
+        first_id = first.json()["paper"]["id"]
+        second = self.upload(make_pdf("Abstract\nDifferent study of atmospheric pressure during seasonal storms.\nIntroduction\nContext for the study.\nMethods\nMeasurements."))
+        self.assertEqual(second.status_code, 201)
+        second_id = second.json()["paper"]["id"]
+        from app.services.identity_worker import process_one
+        asyncio.run(process_one(self.repository, discovery))
+        asyncio.run(process_one(self.repository, discovery))
+        identity = self.client.get(f"/api/v1/papers/{first_id}").json()["paper"]["publication_identity"]
+        self.assertEqual(identity["status"], "verified_published")
+        self.assertEqual((identity["authors"], identity["year"], identity["venue"]),
+                         (["Ada Miller"], 2024, "Research Conference"))
+        self.assertEqual(self.client.get(f"/api/v1/papers/{second_id}").json()["paper"]["publication_identity"]["status"], "not_verified")
+        self.user_id = "bob"
+        self.assertEqual(self.client.get(f"/api/v1/papers/{first_id}").status_code, 404)
+
+    def test_upload_returns_extracted_metadata_before_provider_lookup(self):
+        title = "Measuring Coastal Sound Propagation"
+        with pymupdf.open() as document:
+            page = document.new_page()
+            page.insert_textbox(pymupdf.Rect(40, 40, 550, 750), "\n".join([
+                title, "Ana Rivera", "DOI: 10.1234/coast", "Abstract",
+                "We measured acoustic propagation along the coast.", "1 Introduction",
+                "This later section should be excluded from the abstract.", "References", "DOI: 10.1234/other",
+            ]))
+            document.set_metadata({"title": title, "author": "Ana Rivera; Unrelated Author"})
+            response = self.upload(document.tobytes(), "coast.pdf")
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertEqual(payload["paper"]["publication_identity"]["status"], "pending")
+        metadata = payload["extracted_metadata"]
+        self.assertEqual(metadata["title"], title)
+        self.assertEqual(metadata["authors"], ["Ana Rivera"])
+        self.assertEqual(metadata["doi"], "10.1234/coast")
+        self.assertEqual(metadata["abstract"], "We measured acoustic propagation along the coast.")
+        url = f"/api/v1/papers/{payload['paper']['id']}?include_chunks=false"
+        self.assertEqual(self.client.get(url).json()["extracted_metadata"], metadata)
+        self.assertEqual(self.client.get(url).json()["chunks"], [])
+        self.user_id = "bob"
+        self.assertEqual(self.client.get(url).status_code, 404)
+
+    def test_outage_preserves_metadata_and_old_papers_can_omit_it(self):
+        from app.services.identity_worker import process_one
+        from unittest.mock import Mock
+
+        response = self.upload(make_pdf(
+            "A Study of Coastal Sounds\nAvery Miller\nDOI: 10.1234/coast\nAbstract: Measured sounds. A sample of patterns was collected.\nMethods\nWe collected observations at three coastal stations."))
+        paper_id = response.json()["paper"]["id"]
+        paper = self.repository.papers[paper_id]
+        paper["publication_identity"]["attempts"] = 2
+        offline = Mock(client=None)
+        offline.search.return_value = {"results": [], "provider_errors": {"crossref": "timeout"}}
+        asyncio.run(process_one(self.repository, offline))
+        url = f"/api/v1/papers/{paper_id}?include_chunks=false"
+        detail = self.client.get(url).json()
+        self.assertEqual(detail["paper"]["publication_identity"]["status"], "verification_unavailable")
+        self.assertTrue(detail["extracted_metadata"]["abstract"].startswith("Measured sounds."))
+        paper.pop("identity_input")
+        self.assertIsNone(self.client.get(url).json()["extracted_metadata"])
+
+    def test_certificate_is_rejected_and_unreadable_pdf_needs_review(self):
+        certificate = make_pdf("Certificate of Completion\nAwarded to an attendee who has successfully completed all the lessons and projects.")
+        rejection = self.upload(certificate)
+        self.assertEqual(rejection.status_code, 422)
+        self.assertIn("appears to be a certificate", rejection.json()["detail"])
+        self.assertFalse(self.repository.papers)
+        self.assertEqual(self.repository.rejections[0][0], "alice")
+        checks = {item["check_id"]: item for item in self.repository.rejections[0][1]}
+        self.assertEqual(checks["H3"]["status"], "FAIL")
+        unknown = self.upload(make_pdf(""))
+        self.assertEqual(unknown.status_code, 201)
+        public = unknown.json()["paper"]
+        self.assertEqual(public["document_state"], "NEEDS_REVIEW")
+        self.assertIn("No readable text", public["error"])
+        self.assertNotIn("verification_checks", public)
+        saved = self.repository.papers[public["id"]]
+        checks = {item["check_id"]: item for item in saved["verification_checks"]}
+        self.assertEqual(checks["H4"]["status"], "UNAVAILABLE")
+        self.assertEqual(checks["M9"]["status"], "UNAVAILABLE")
+        self.cloudinary_upload.assert_called_once()
+        self.assertEqual(self.ingestion.vectors.collection.count(), 0)
+
+    def test_corrupt_pdf_has_a_rejection_audit_and_is_never_indexed(self):
+        response = self.upload(b"%PDF-1.7\nMissing all objects and cross references")
+        self.assertEqual(response.status_code, 422)
+        checks = {item["check_id"]: item for item in self.repository.rejections[0][1]}
+        self.assertEqual(checks["H2"]["status"], "FAIL")
+        self.assertFalse(self.repository.papers)
+        self.cloudinary_upload.assert_not_called()
+
+    def test_renamed_nonresearch_uploads_are_rejected_before_storage(self):
+        for text, label in (
+            ("Curriculum Vitae\nJamie Rivera\nSkills\nSoftware development and testing.\nEducation\nBachelor of Science.",
+             "resume or CV"),
+            ("Invoice 302\nBill to the company listed below.\nAmount due equals the subtotal plus tax.",
+             "invoice or receipt"),
+            ("Homework 3\nDue date: Monday. Submit your report to your instructor for grading.",
+             "academic assignment"),
+        ):
+            with self.subTest(label=label):
+                response = self.upload(make_pdf(text), "Peer-reviewed Journal Article.pdf")
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIn(label, response.json()["detail"])
+        self.assertEqual(self.upload(b"Not a PDF", "Conference Research Paper.pdf").status_code, 422)
+        self.assertFalse(self.repository.papers)
+        self.cloudinary_upload.assert_not_called()
+        self.assertEqual(self.ingestion.vectors.collection.count(), 0)
+
+    def test_readable_ambiguous_pdf_is_review_only(self):
+        response = self.upload(make_pdf("An undated note about a new idea for collecting observations during the spring."))
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["paper"]["status"], "needs_review")
+        self.assertIn("couldn't confidently determine", response.json()["paper"]["error"])
+        self.assertEqual(response.json()["chunks"], [])
+        self.assertEqual(self.ingestion.vectors.collection.count(), 0)
+
+    def test_arxiv_preprint_is_accepted_and_matched_as_a_preprint(self):
+        from unittest.mock import Mock
+        from app.services.identity_worker import process_one
+
+        title = "Bounds on Repeated Sampling"
+        content = make_pdf(f"{title}\nAda Miller\narXiv:2101.12345v1 [stat.ME]\nAbstract\n"
+                           "We analyze sampling bounds for a class of estimators.\nIntroduction\n"
+                           "This article investigates repeated sampling.\nMethods\n"
+                           "We derive the bounds in finite samples.")
+        response = self.upload(content)
+        self.assertEqual(response.status_code, 201, response.text)
+        paper = response.json()["paper"]
+        self.assertEqual(paper["status"], "ready")
+        self.assertEqual(response.json()["extracted_metadata"]["arxiv_id"], "2101.12345v1")
+        registry = Mock(client=None)
+        registry.search.return_value = {"results": [{
+            "title": title, "authors": ["Ada Miller"], "status": "verified_preprint",
+            "arxiv_id": "2101.12345v1", "sources": ["arXiv"], "landing_url": "https://arxiv.org/abs/2101.12345v1",
+        }], "provider_errors": {}}
+        asyncio.run(process_one(self.repository, registry))
+        result = self.client.get(f'/api/v1/papers/{paper["id"]}').json()["paper"]["publication_identity"]
+        self.assertEqual(result["status"], "verified_preprint")
+
+    def test_optional_metadata_and_pending_identity_do_not_block_readiness(self):
+        response = self.upload()
+        self.assertEqual(response.status_code, 201)
+        public = response.json()["paper"]
+        self.assertEqual(public["document_state"], "READY_FOR_RESEARCH")
+        saved = self.repository.papers[public["id"]]
+        checks = {item["check_id"]: item for item in saved["verification_checks"]}
+        self.assertTrue(all(checks[f"H{i}"]["status"] == "PASS" for i in range(1, 5)))
+        self.assertEqual(checks["H5"]["status"], "UNAVAILABLE")
+        self.assertEqual(checks["M6"]["status"], "NOT_APPLICABLE")
+        self.assertEqual(checks["M9"]["status"], "PASS")
+
+    def test_legacy_certificate_is_reclassified_and_original_remains_owned(self):
+        paper_id = self.upload().json()["paper"]["id"]
+        paper = self.repository.papers[paper_id]
+        paper.pop("document_type")
+        certificate = "Certificate of Completion\nAwarded to an attendee who has successfully completed all the lessons and projects."
+        paper["identity_input"] = {"first": certificate, "text": certificate}
+        paper["publication_identity"] = {"status": "verified_published"}
+        url = f"/api/v1/papers/{paper_id}"
+        self.user_id = "bob"
+        self.assertEqual(self.client.get(url).status_code, 404)
+        self.assertEqual(paper["status"], "ready")
+        self.user_id = "alice"
+        detail = self.client.get(url).json()
+        self.assertEqual(detail["paper"]["status"], "not_research")
+        self.assertIsNone(detail["paper"]["publication_identity"])
+        self.assertEqual(detail["chunks"], [])
+        self.assertEqual(self.client.get(url + "/file", follow_redirects=False).status_code, 307)
+        self.assertEqual(self.client.get("/api/v1/papers?status=ready").json(), [])
+        self.assertEqual(self.client.post(url + "/verification/retry").status_code, 409)
+        self.cloudinary_upload.assert_called_once()
+
+    def test_retry_is_owner_scoped_and_does_not_reupload(self):
+        from app.services.identity_worker import process_one
+        from unittest.mock import Mock
+        response = self.upload(make_pdf("Abstract\nAnalysing spring air pressure patterns across a range of altitudes.\nIntroduction\nScope.\nMethods\nMeasurements."))
+        paper_id = response.json()["paper"]["id"]
+        asyncio.run(process_one(self.repository, Mock()))
+        self.user_id = "bob"
+        self.assertEqual(self.client.post(f"/api/v1/papers/{paper_id}/verification/retry").status_code, 404)
+        self.user_id = "alice"
+        self.assertEqual(self.client.post(f"/api/v1/papers/{paper_id}/verification/retry").status_code, 202)
+        self.assertEqual(self.client.post(f"/api/v1/papers/{paper_id}/verification/retry").status_code, 409)
+        self.assertEqual(self.cloudinary_upload.call_count, 1)
+
+    def test_old_paper_schedules_metadata_recovery_without_reindex(self):
+        paper_id = self.upload(make_pdf("Abstract\nAn older study with enough readable first page text.\nIntroduction\nScope.\nMethods\nMeasurements.")).json()["paper"]["id"]
+        self.repository.papers[paper_id].pop("identity_input")
+        self.repository.papers[paper_id].pop("publication_identity")
+        count = self.ingestion.vectors.collection.count()
+        self.user_id = "bob"
+        self.assertEqual(self.client.post(f"/api/v1/papers/{paper_id}/verification/retry").status_code, 404)
+        self.user_id = "alice"
+        self.assertEqual(self.client.post(f"/api/v1/papers/{paper_id}/verification/retry").status_code, 202)
+        self.assertEqual(self.client.post(f"/api/v1/papers/{paper_id}/verification/retry").status_code, 409)
+        self.assertEqual(self.ingestion.vectors.collection.count(), count)
+        self.assertEqual(self.cloudinary_upload.call_count, 1)
+
+    def test_retry_reextracts_the_stored_pdf_and_persists_new_identity(self):
+        from app.services.identity_worker import process_one
+        from unittest.mock import Mock
+
+        title = "Measuring Coastal Sound Propagation"
+        content = make_pdf(f"{title}\nAna Rivera\nDOI: 10.1234/coast\nAbstract\nWe measured coastal sounds.\nMethods\nWe measured three field stations.")
+        response = self.upload(content)
+        self.assertEqual(response.status_code, 201)
+        paper_id = response.json()["paper"]["id"]
+        paper = self.repository.papers[paper_id]
+        paper["identity_input"] = {"first": "", "text": ""}
+        discovery = Mock(client=None)
+        asyncio.run(process_one(self.repository, discovery, self.ingestion.read_original))
+        self.assertEqual(paper["publication_identity"]["reason_code"], "insufficient_metadata")
+        discovery.search.assert_not_called()
+        url = f"/api/v1/papers/{paper_id}"
+        self.assertEqual(self.client.post(url + "/verification/retry").status_code, 202)
+        self.assertEqual(self.client.get(url).json()["paper"]["publication_identity"]["status"], "pending")
+        discovery.search.return_value = {"results": [{"title": title, "authors": ["Ana Rivera"],
+            "doi": "10.1234/coast", "status": "verified_published", "year": 2023, "sources": ["Crossref"]}]}
+        download = Mock(status_code=200)
+        download.iter_content.return_value = [content]
+        with patch("app.services.pdf_storage.requests.get") as request:
+            request.return_value.__enter__.return_value = download
+            asyncio.run(process_one(self.repository, discovery, self.ingestion.read_original))
+        discovery.search.assert_called_once_with("10.1234/coast", 0, 1)
+        reopened = self.client.get(url).json()
+        self.assertEqual(reopened["paper"]["publication_identity"]["status"], "verified_published")
+        self.assertEqual(reopened["extracted_metadata"]["doi"], "10.1234/coast")
+        self.assertEqual(self.cloudinary_upload.call_count, 1)
+        self.assertEqual(self.ingestion.vectors.collection.count(), response.json()["paper"]["chunk_count"])
+
+    def test_retry_reports_missing_original_and_enforces_cooldown(self):
+        from app.services.identity_worker import process_one
+        from unittest.mock import Mock
+
+        paper_id = self.upload().json()["paper"]["id"]
+        paper = self.repository.papers[paper_id]
+        paper.update(identity_input={}, publication_identity={"status": "not_verified"})
+        url = f"/api/v1/papers/{paper_id}/verification/retry"
+        self.assertEqual(self.client.post(url).status_code, 202)
+        asyncio.run(process_one(self.repository, Mock(), Mock(side_effect=OSError)))
+        self.assertEqual(paper["publication_identity"]["reason_code"], "original_pdf_unavailable")
+        self.assertIn("original PDF could not be reopened", paper["publication_identity"]["reason"])
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=30)
+        paper["publication_identity"]["retry_after"] = deadline.replace(tzinfo=None)
+        limited = self.client.post(url)
+        self.assertEqual(limited.status_code, 429)
+        self.assertGreater(int(limited.headers["Retry-After"]), 0)
+        saved_deadline = self.client.get(url.removesuffix("/verification/retry")).json()["paper"]["publication_identity"]["retry_after"]
+        self.assertEqual(datetime.fromisoformat(saved_deadline), deadline)
 
     def test_delete_removes_owned_paper_pdf_and_vectors_and_allows_reupload(self):
         paper_id = self.upload().json()["paper"]["id"]

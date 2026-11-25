@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { getAdminUsers, getCurrentUser, SignedInUser } from "../services/authApi";
+import AnswerQualityMonitor from "../components/AnswerQualityMonitor";
 
 export default function AdminPage() {
   const [admin, setAdmin] = useState<SignedInUser | null>(null);
@@ -78,6 +79,7 @@ export default function AdminPage() {
                 </tbody>
               </table>
             </div>
+            <AnswerQualityMonitor />
           </>
         )}
       </main>

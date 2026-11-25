@@ -13,8 +13,9 @@ import time
 from datetime import date, datetime, timezone
 from uuid import uuid4
 from urllib.parse import urlparse
-from requests.exceptions import Timeout as RequestTimeout
+from requests.exceptions import HTTPError, Timeout as RequestTimeout
 from pydantic import BaseModel, Field
+import pymupdf
 from starlette.concurrency import run_in_threadpool
 
 from ..dependencies import get_current_user
@@ -23,19 +24,27 @@ from ..models import UserResponse
 from ..paper_models import ChunkResponse
 from ..providers.answers import (AnswerProvider, AnswerRateLimitError, Evidence, EvidenceAssessment, EvidenceQuote,
                                  EvidenceStatus, ExternalEvidence)
-from ..providers.groq_answers import GroqAnswerProvider, groq_request_id, groq_trace
+from ..providers.openrouter_answers import (OpenRouterAnswerProvider, model_runs, openrouter_cache_scope,
+                                           openrouter_request_id, openrouter_trace)
+from ..providers.openrouter_routing import RERANK_CANDIDATES, UpstreamPoolLimit
 from ..providers.external_search import TavilyExternalSearch
 from ..repositories.papers import PaperRepository
 from ..repositories.conversations import ConversationRepository
 from ..repositories.vectors import VectorRepository
 from ..services.ingestion import IngestionService
 from ..services.evidence_coverage import CoveragePassage, coverage_report, missing_coverage, requested_coverage
+from ..services.demo_research import (
+    CASES, EXTERNAL_QUESTIONS, EXTERNAL_SOURCES, REPLY_RANGE, REPLY_THRESHOLD,
+    is_sample, question_key, sample_quote, sample_recommendations, sample_source,
+)
 from ..services.research_subjects import requested_subjects, subject_spans
 from ..services.claim_verification import split_claims, review_claims, present_claims
+from ..services.verification_gates import answer_report, ready_for_research
+from ..services.answer_quality import AnswerQuality
 from ..services.question_recommendations import QuestionRecommendationService, RecommendedQuestion
 
 router = APIRouter(prefix="/api/v1/research", tags=["research"])
-_GROQ_COOLDOWN_COOKIE = "citewise_groq_cooldown"
+_OPENROUTER_COOLDOWN_COOKIE = "citewise_openrouter_cooldown"
 
 
 def _cooldown_signature(key: str, deadline: int) -> str:
@@ -43,8 +52,8 @@ def _cooldown_signature(key: str, deadline: int) -> str:
     return hmac.new(secret, f"{key}\0{deadline}".encode(), sha256).hexdigest()
 
 
-def _cooldown_seconds(request: Request, provider: GroqAnswerProvider) -> int:
-    token = request.cookies.get(_GROQ_COOLDOWN_COOKIE, "")
+def _cooldown_seconds(request: Request, provider: OpenRouterAnswerProvider) -> int:
+    token = request.cookies.get(_OPENROUTER_COOLDOWN_COOKIE, "")
     deadline_text, separator, signature = token.partition(".")
     if (not separator or not deadline_text.isdecimal() or len(deadline_text) > 12
             or not re.fullmatch(r"[0-9a-f]{64}", signature)):
@@ -59,7 +68,7 @@ def _rate_limit_headers(exc: AnswerRateLimitError, provider: AnswerProvider) -> 
     if not exc.retry_after:
         return None
     headers = {"Retry-After": exc.retry_after}
-    if isinstance(provider, GroqAnswerProvider) and provider.api_key:
+    if isinstance(provider, OpenRouterAnswerProvider) and provider.api_key:
         try:
             seconds = int(exc.retry_after)
         except (TypeError, ValueError):
@@ -69,12 +78,34 @@ def _rate_limit_headers(exc: AnswerRateLimitError, provider: AnswerProvider) -> 
         deadline = int(time.time()) + seconds
         token = f"{deadline}.{_cooldown_signature(provider.api_key, deadline)}"
         secure = "; Secure" if get_settings().session_cookie_secure else ""
-        headers["Set-Cookie"] = (f"{_GROQ_COOLDOWN_COOKIE}={token}; Max-Age={seconds}; "
+        headers["Set-Cookie"] = (f"{_OPENROUTER_COOLDOWN_COOKIE}={token}; Max-Age={seconds}; "
                                  f"Path=/api/v1/research; HttpOnly; SameSite=Lax{secure}")
     return headers
-_assessment_cache: OrderedDict[tuple[GroqAnswerProvider, str], "EvidenceReview"] = OrderedDict()
+
+
+_RATE_LIMIT_MESSAGES = {
+    "local_daily_budget": "CiteWise’s daily request budget is exhausted.",
+    "local_minute_budget": "CiteWise’s per-minute request budget is exhausted.",
+    "openrouter_free_tier_daily": "OpenRouter’s daily free-model quota is exhausted.",
+    "openrouter_free_tier_per_minute": "OpenRouter’s per-minute free-model quota is exhausted.",
+    "account_cooldown": "CiteWise has paused OpenRouter requests after a rate limit.",
+    "upstream_provider_shared_pool": "The model providers are temporarily busy.",
+}
+
+
+def _rate_limit_detail(exc: AnswerRateLimitError, message: str) -> dict[str, str]:
+    return {
+        "message": _RATE_LIMIT_MESSAGES.get(exc.limit_source, message),
+        "limit_source": exc.limit_source if exc.limit_source in _RATE_LIMIT_MESSAGES else "unknown",
+        "code": "upstream_capacity" if isinstance(exc, UpstreamPoolLimit) else "rate_limited",
+    }
+
+
+_assessment_cache: OrderedDict[tuple[OpenRouterAnswerProvider, str], "EvidenceReview"] = OrderedDict()
 _assessment_cache_lock = Lock()
 _assessment_cache_limit = 128
+_retrieval_cache: OrderedDict[tuple, tuple[float, tuple[ChunkResponse, ...]]] = OrderedDict()
+_retrieval_cache_lock = Lock()
 _verification_locks = [asyncio.Lock() for _ in range(64)]
 
 
@@ -82,6 +113,15 @@ class SearchRequest(BaseModel):
     paper_id: str = Field(min_length=1)
     question: str = Field(min_length=1, max_length=1000)
     limit: int = Field(default=5, ge=1, le=10)
+
+
+class VisualAnalysisRequest(BaseModel):
+    paper_id: str = Field(min_length=1)
+    page_number: int = Field(ge=1)
+    question: str = Field(min_length=1, max_length=1000)
+    evidence_type: Literal["figure", "chart", "table", "diagram", "scanned_page"]
+    text_insufficient: Literal[True]
+    consent_to_send_page: Literal[True]
 
 
 class SearchPassage(ChunkResponse):
@@ -129,20 +169,35 @@ class ClaimReviewResponse(BaseModel):
     supporting: list[ClaimQuoteResponse]
     opposing: list[ClaimQuoteResponse]
     explanation: str = ""
+    reason_code: str | None = None
+
+
+def _reviewed_status(claims: list[ClaimReviewResponse], pdf_partial: bool, *, external: bool = False) -> EvidenceStatus:
+    statuses = {claim.status for claim in claims}
+    if "contradicted" in statuses:
+        return "contradictory_evidence"
+    if "partially_supported" in statuses or ("supported" in statuses and (pdf_partial or "unsupported" in statuses)):
+        return "partially_supported"
+    if "supported" in statuses:
+        return "not_mentioned" if external else "answered"
+    return "insufficient_evidence"
+
+
+AnswerState = Literal["VERIFIED", "PARTIALLY_SUPPORTED", "INSUFFICIENT_EVIDENCE", "VERIFICATION_UNAVAILABLE"]
 
 
 class SearchTrace(BaseModel):
     tavily_calls: int = 0
     tavily_cache_hits: int = 0
-    groq_calls: int = 0
-    groq_cache_hits: int = 0
-    groq_attempts: int = 0
-    groq_retries: int = 0
-    groq_failures: int = 0
-    groq_rate_limits: int = 0
-    groq_server_errors: int = 0
-    groq_network_errors: int = 0
-    groq_rate_limit_kind: str | None = None
+    openrouter_calls: int = 0
+    openrouter_cache_hits: int = 0
+    openrouter_attempts: int = 0
+    openrouter_retries: int = 0
+    openrouter_failures: int = 0
+    openrouter_rate_limits: int = 0
+    openrouter_server_errors: int = 0
+    openrouter_network_errors: int = 0
+    openrouter_rate_limit_kind: str | None = None
     queries: list[str] = Field(default_factory=list)
     failures: int = 0
     duplicate_requests: int = 0
@@ -165,7 +220,7 @@ def _external_source(item: ExternalEvidence) -> ExternalSource:
     return ExternalSource(id=item.id, title=item.title, url=item.url,
         published_date=item.published_date, verified_publication_date=item.verified_publication_date,
         source_host=urlparse(item.url).hostname, publisher=item.publisher, author=item.author,
-        excerpt=item.content[:700])
+        excerpt=item.content[:3000])
 
 
 class EvidenceReview(BaseModel):
@@ -187,7 +242,8 @@ class AskResponse(BaseModel):
     assessment: EvidenceReview | None = None
     claims: list[ClaimReviewResponse] = Field(default_factory=list)
     search_trace: SearchTrace = Field(default_factory=SearchTrace)
-    verification_status: Literal["verified", "unavailable"] = "verified"
+    verification_status: Literal["verified", "not_verified", "unavailable"] = "not_verified"
+    answer_state: AnswerState | None = None
     retry_after_seconds: int = 0
 
 
@@ -209,7 +265,8 @@ class SavedMessage(BaseModel):
     search_trace: SearchTrace = Field(default_factory=SearchTrace)
     created_at: datetime
     feedback: AnswerFeedback | None = None
-    verification_status: Literal["verified", "unavailable"] = "verified"
+    verification_status: Literal["verified", "not_verified", "unavailable"] = "not_verified"
+    answer_state: AnswerState | None = None
     retry_after_seconds: int = 0
 
 
@@ -247,8 +304,8 @@ class RecommendedQuestionResponse(BaseModel):
     id: str
     text: str
     recommendation_type: str
-    page_number: int
-    chunk_index: int
+    page_number: int | None = None
+    chunk_index: int | None = None
 
 
 class RecommendationResponse(BaseModel):
@@ -279,11 +336,58 @@ def _recommendation_service(request: Request) -> QuestionRecommendationService:
                                          getattr(request.app.state, "answer_provider", None))
 
 
+async def _demo_recommendations(request: Request, user: UserResponse, paper_id: str, paper: dict,
+                                previous: list[str], limit: int) -> RecommendationResponse:
+    ingestion = request.app.state.ingestion_service
+    if not is_sample(paper):
+        service = QuestionRecommendationService(ingestion.vectors, ingestion.embeddings.embed, provider=None)
+        questions = await run_in_threadpool(service.local_suggestions, user.id, paper_id,
+                                            paper.get("chunk_count", 0), previous, limit)
+        return _recommendation_response(paper_id, questions)
+    chunks = await run_in_threadpool(ingestion.preview, user.id, paper_id, limit=paper["chunk_count"])
+    result = _recommendation_response(paper_id, sample_recommendations(chunks, previous, limit))
+    seen = {question_key(question) for question in previous}
+    result.recommendations.extend(
+        RecommendedQuestionResponse(id=f"demo-external-{index}", text=question, recommendation_type="sample_external")
+        for index, question in enumerate(EXTERNAL_QUESTIONS) if question_key(question) not in seen
+    )
+    return result
+
+
+def _demo_external_answer(paper_id: str, question: str) -> AskResponse | None:
+    lookup = [question_key(item) for item in EXTERNAL_QUESTIONS]
+    if question_key(question) not in lookup:
+        return None
+    compare = question_key(question) == lookup[0]
+    critique, reply = [ExternalSource(**item) for item in EXTERNAL_SOURCES]
+    assessment = EvidenceReview(level="none", chunk_ids=[],
+        missing_information="The PDF summarizes criticism but does not provide enough evidence to answer this question about the full 2007 exchange.")
+    if compare:
+        claim = ClaimReviewResponse(
+            text="Whether the model allows convincing evidence across research designs",
+            section="external", status="contradicted",
+            supporting=[ClaimQuoteResponse(source_id=reply.id, quote=REPLY_RANGE)],
+            opposing=[ClaimQuoteResponse(source_id=critique.id, quote=EXTERNAL_SOURCES[0]["excerpt"])],
+            explanation="The two commentaries interpret the scope of the model differently. Neither commentary independently measures the real-world false discovery rate.",
+            reason_code="demo_sample")
+        return AskResponse(paper_id=paper_id, status="contradictory_evidence", sources=[],
+            external_sources=[critique, reply], assessment=assessment, claims=[claim],
+            answer=("Goodman and Greenland argued that the model's assumptions made even strong study designs yield weak evidence [e1]. "
+                    "Ioannidis replied that his illustrative examples gave a wide range of credibility across designs and settings [e2]. "
+                    "They disagreed about what the model allowed one to conclude. The exchange does not establish a single real-world false discovery rate."))
+    answer = "In his reply, Ioannidis said his model did not assume that all significant p-values were near 0.05."
+    return AskResponse(paper_id=paper_id, status="not_mentioned", sources=[], external_sources=[reply],
+        assessment=assessment, answer=f"{answer} [e2]",
+        claims=[ClaimReviewResponse(text=answer, section="external", status="supported",
+            supporting=[ClaimQuoteResponse(source_id=reply.id, quote=REPLY_THRESHOLD)],
+            opposing=[], explanation="Attributed to the published reply.", reason_code="demo_sample")])
+
+
 def _log_recommendation_run(mode: str, paper_id: str, service: QuestionRecommendationService,
                             recommendations: list[RecommendedQuestion], started_at: float) -> None:
     logging.getLogger(__name__).info(
-        "research_recommendations mode=%s paper_id=%s count=%s provider_used=%s latency_ms=%s",
-        mode, paper_id, len(recommendations), service.provider_used,
+        "research_recommendations mode=%s paper_id=%s count=%s provider_used=%s local_fallback=%s latency_ms=%s",
+        mode, paper_id, len(recommendations), service.provider_used, service.used_local_fallback,
         round((time.monotonic() - started_at) * 1000),
     )
 
@@ -293,19 +397,60 @@ async def _ready_recommendation_paper(request: Request, user: UserResponse, pape
     paper = await papers.find(user.id, paper_id)
     if paper is None:
         raise HTTPException(404, "Paper not found.")
-    if paper.get("status") != "ready":
+    if not ready_for_research(paper):
         raise HTTPException(409, "Wait until this paper is ready.")
     return paper
 
 
-async def _generate_recommendations(function, *args):
+@router.post("/visual-analysis")
+async def analyze_visual_page(payload: VisualAnalysisRequest, request: Request,
+                              user: UserResponse = Depends(get_current_user)):
+    paper = await _ready_recommendation_paper(request, user, payload.paper_id)
+    question = payload.question.strip()
+    if not question:
+        raise HTTPException(422, "Enter a question about the page.")
+    provider = getattr(request.app.state, "answer_provider", None)
+    if not isinstance(provider, OpenRouterAnswerProvider) or not provider.vision_enabled or not provider.available():
+        raise HTTPException(503, "Visual analysis is unavailable.")
+    ingestion: IngestionService = request.app.state.ingestion_service
+
+    def render_page() -> bytes:
+        with pymupdf.open(stream=ingestion.read_original(paper), filetype="pdf") as document:
+            if payload.page_number > len(document):
+                raise HTTPException(404, "PDF page not found.")
+            page = document[payload.page_number - 1]
+            scale = min(2, 1800 / max(page.rect.width, page.rect.height))
+            return page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False).tobytes("png")
+
     try:
-        return await run_in_threadpool(function, *args)
+        png = await run_in_threadpool(render_page)
+        result = await run_in_threadpool(provider.analyze_page_image, question, payload.evidence_type, png)
+    except HTTPException:
+        raise
+    except AnswerRateLimitError as exc:
+        raise HTTPException(429, "Visual analysis is temporarily rate limited.",
+                            headers=_rate_limit_headers(exc, provider)) from None
+    except Exception:
+        raise HTTPException(503, "Visual analysis is temporarily unavailable.") from None
+    return {"paper_id": payload.paper_id, "page_number": payload.page_number,
+            "evidence_type": payload.evidence_type, "verification_status": "unverified", **result}
+
+
+async def _generate_recommendations(function, owner_id, paper_id, *args):
+    scope = openrouter_cache_scope.set((owner_id, paper_id))
+    try:
+        return await run_in_threadpool(function, owner_id, paper_id, *args)
     except AnswerRateLimitError as exc:
         headers = {"Retry-After": exc.retry_after} if exc.retry_after else None
-        raise HTTPException(429, "Suggestions are temporarily rate limited.", headers=headers) from None
-    except Exception:
+        raise HTTPException(429, _rate_limit_detail(exc, "Suggestions are temporarily rate limited."),
+                            headers=headers) from None
+    except Exception as exc:
+        upstream = exc.response if isinstance(exc, HTTPError) else None
+        logging.getLogger(__name__).warning("research_recommendations_unavailable error_type=%s upstream_status=%s",
+                                            type(exc).__name__, upstream.status_code if upstream is not None else None)
         raise HTTPException(503, "Suggestions are temporarily unavailable.") from None
+    finally:
+        openrouter_cache_scope.reset(scope)
 
 
 async def _verified_sections(provider: AnswerProvider, question: str, pdf_text: str,
@@ -313,9 +458,11 @@ async def _verified_sections(provider: AnswerProvider, question: str, pdf_text: 
                              pdf_sources: dict[str, AnswerSource],
                              external_sources: dict[str, ExternalEvidence],
                              request_id: str | None = None, debug_claims: bool = False,
-                             raise_unavailable: bool = False
+                             raise_unavailable: bool = False, quality: AnswerQuality | None = None
                              ) -> tuple[str, str, list[ClaimReviewResponse]]:
     claims = split_claims(pdf_text, external_text)
+    if quality is not None:
+        quality.capture(pdf_text, external_text, pdf_ids, external_ids, pdf_sources, external_sources, claims)
     if not claims or len(claims) > 20:
         return "", "", []
     # Generators may cite a whole paragraph and return its source IDs separately.
@@ -331,8 +478,8 @@ async def _verified_sections(provider: AnswerProvider, question: str, pdf_text: 
                 for cited in item.cited_ids))
             if not item.cited_ids:
                 item.cited_ids.extend(ids)
-    evidence = ([Evidence(item.id, item.text) for item in pdf_sources.values()] +
-                [Evidence(item.id, item.content) for item in external_sources.values()])
+    evidence = ([Evidence(item.id, item.text, {"origin": "pdf"}) for item in pdf_sources.values()] +
+                [Evidence(item.id, item.content, item.provenance()) for item in external_sources.values()])
     verifier = getattr(provider, "verify_claims", None)
     if verifier is None:
         return "", "", []
@@ -354,6 +501,12 @@ async def _verified_sections(provider: AnswerProvider, question: str, pdf_text: 
             except ValueError:
                 pass
     reviewed = review_claims(claims, proposed, evidence, verified_dates)
+    if quality is not None:
+        counts = Counter(item.claim_id for item in proposed)
+        known_claims = {item.id for item in claims}
+        quality.assessments = {item.claim_id: item for item in proposed
+                               if counts[item.claim_id] == 1 and item.claim_id in known_claims}
+        quality.requirements = getattr(proposed, "requirements", [])
     safe_request_id = request_id if isinstance(request_id, str) and re.fullmatch(
         r"[A-Za-z0-9_-]{1,64}", request_id) else "none"
     for index, item in enumerate(reviewed, start=1):
@@ -384,7 +537,7 @@ async def _verified_sections(provider: AnswerProvider, question: str, pdf_text: 
         status=item.status,
         supporting=[ClaimQuoteResponse(source_id=q.source_id, quote=q.quote) for q in item.supporting],
         opposing=[ClaimQuoteResponse(source_id=q.source_id, quote=q.quote) for q in item.opposing],
-        explanation=item.explanation) for item in reviewed]
+        explanation=item.explanation, reason_code=item.reason_code) for item in reviewed]
     return present_claims(reviewed, "pdf"), present_claims(reviewed, "external"), responses
 
 
@@ -549,6 +702,8 @@ async def save_answer_feedback(conversation_id: str, message_id: str, feedback: 
 async def starter_recommendations(paper_id: str, request: Request,
                                   user: UserResponse = Depends(get_current_user)):
     paper = await _ready_recommendation_paper(request, user, paper_id)
+    if getattr(request.app.state, "demo_mode", False):
+        return await _demo_recommendations(request, user, paper_id, paper, [], len(CASES))
     service = _recommendation_service(request)
     started_at = time.monotonic()
     recommendations = await _generate_recommendations(service.starter, user.id, paper_id, paper)
@@ -567,6 +722,8 @@ async def alternative_recommendations(paper_id: str, payload: AlternativeRecomme
         if conversation is None or conversation.get("paper_id") != paper_id:
             raise HTTPException(404, "Conversation not found.")
         previous = [item.get("question", "") for item in conversation.get("messages", [])]
+    if getattr(request.app.state, "demo_mode", False):
+        return await _demo_recommendations(request, user, paper_id, paper, previous + [payload.question], 3)
     service = _recommendation_service(request)
     started_at = time.monotonic()
     recommendations = await _generate_recommendations(service.alternatives, user.id, paper_id,
@@ -583,7 +740,7 @@ async def follow_up_recommendations(conversation_id: str, payload: FollowUpRecom
     if conversation is None:
         raise HTTPException(404, "Conversation not found.")
     paper_id = conversation["paper_id"]
-    await _ready_recommendation_paper(request, user, paper_id)
+    paper = await _ready_recommendation_paper(request, user, paper_id)
     message = next((item for item in conversation.get("messages", []) if item.get("id") == payload.message_id), None)
     if message is None:
         raise HTTPException(404, "Answer not found.")
@@ -592,6 +749,8 @@ async def follow_up_recommendations(conversation_id: str, payload: FollowUpRecom
     if (message.get("status") != "answered" and not supported) or not message.get("answer"):
         return _recommendation_response(paper_id, [])
     previous = [item.get("question", "") for item in conversation.get("messages", [])]
+    if getattr(request.app.state, "demo_mode", False):
+        return await _demo_recommendations(request, user, paper_id, paper, previous, 3)
     service = _recommendation_service(request)
     started_at = time.monotonic()
     recommendations = await _generate_recommendations(service.follow_up, user.id, paper_id,
@@ -604,15 +763,21 @@ async def follow_up_recommendations(conversation_id: str, payload: FollowUpRecom
 @router.post("/conversations/{conversation_id}/messages/{message_id}/verify", response_model=SavedMessage)
 async def retry_message_verification(conversation_id: str, message_id: str, request: Request,
                                      user: UserResponse = Depends(get_current_user)):
+    quality = AnswerQuality()
     repository: ConversationRepository = request.app.state.conversation_repository
     document = await repository.find(user.id, conversation_id)
     if document is None:
         raise HTTPException(404, "Conversation not found.")
     await _ready_recommendation_paper(request, user, document["paper_id"])
+    if getattr(request.app.state, "demo_mode", False):
+        message = next((item for item in document.get("messages", []) if item.get("id") == message_id), None)
+        if message is None:
+            raise HTTPException(404, "Answer not found.")
+        return SavedMessage(**message)
     provider = getattr(request.app.state, "answer_provider", None)
     if provider is None or (hasattr(provider, "available") and not provider.available()):
         raise HTTPException(503, "Verification is temporarily unavailable.")
-    if isinstance(provider, GroqAnswerProvider):
+    if isinstance(provider, OpenRouterAnswerProvider):
         cooldown = _cooldown_seconds(request, provider)
         if cooldown:
             raise HTTPException(429, "Verification is temporarily rate limited.", headers={"Retry-After": str(cooldown)})
@@ -627,28 +792,54 @@ async def retry_message_verification(conversation_id: str, message_id: str, requ
         if message.get("verification_status", "verified") != "unavailable":
             return SavedMessage(**message)
         sources = {item["id"]: AnswerSource(**item) for item in message.get("sources", [])}
-        if not sources or not message.get("answer"):
+        external = {item["id"]: ExternalEvidence(id=item["id"], title=item["title"], url=item["url"],
+            content=item.get("excerpt") or "", published_date=item.get("published_date"),
+            verified_publication_date=item.get("verified_publication_date"), publisher=item.get("publisher"),
+            author=item.get("author")) for item in message.get("external_sources", [])}
+        if not (sources or external) or not message.get("answer"):
             raise HTTPException(409, "The answer cannot be verified without its evidence.")
+        answer = message["answer"]
+        pdf_text, separator, external_text = answer.partition("\n\nAdditional information from external sources\n")
+        if separator:
+            pdf_text = pdf_text.removeprefix("Evidence from your PDF\n")
+        runs: list[dict] = []
+        trace_token = model_runs.set(runs)
+        scope_token = openrouter_cache_scope.set((user.id, document["paper_id"]))
         try:
-            checked, _, claims = await _verified_sections(provider,
-                message.get("resolved_question") or message["question"], message["answer"], "",
-                list(sources), [], sources, {}, raise_unavailable=True)
+            checked, checked_external, claims = await _verified_sections(provider,
+                message.get("resolved_question") or message["question"], pdf_text,
+                external_text, list(sources), list(external), sources, external, raise_unavailable=True, quality=quality)
         except AnswerRateLimitError as exc:
-            raise HTTPException(429, "Verification is temporarily rate limited.",
+            raise HTTPException(429, _rate_limit_detail(exc, "Verification is temporarily rate limited."),
                                 headers=_rate_limit_headers(exc, provider)) from None
         except Exception:
             raise HTTPException(503, "Verification is temporarily unavailable.") from None
+        finally:
+            model_runs.reset(trace_token)
+            openrouter_cache_scope.reset(scope_token)
         if not claims:
             raise HTTPException(503, "Verification is temporarily unavailable.")
         used = {quote.source_id for item in claims for quote in item.supporting + item.opposing}
-        status = ("contradictory_evidence" if any(item.status == "contradicted" for item in claims)
-                  else "insufficient_evidence" if not any(item.status == "supported" for item in claims)
-                  else "partially_supported" if any(item.status != "supported" for item in claims)
-                  or (message.get("assessment") or {}).get("level") == "partial" else "answered")
-        fields = {"answer": checked or "The generated claims could not be verified.", "status": status,
+        status = _reviewed_status(claims, (message.get("assessment") or {}).get("level") == "partial",
+                                  external=bool(separator))
+        verified_answer = (f"Evidence from your PDF\n{checked}\n\nAdditional information from external sources\n{checked_external}"
+                           if separator else checked)
+        fields = {"answer": verified_answer or "The generated claims could not be verified.", "status": status,
                   "sources": [source.model_dump(mode="json") for key, source in sources.items() if key in used],
+                  "external_sources": [item for item in message.get("external_sources", []) if item["id"] in used],
                   "claims": [item.model_dump(mode="json") for item in claims],
-                  "verification_status": "verified", "retry_after_seconds": 0}
+                  "retry_after_seconds": 0}
+        state, checks = answer_report(status=status, answer=verified_answer, claims=claims,
+            sources=[source for key, source in sources.items() if key in used],
+            external=[item for key, item in external.items() if key in used],
+            question=message.get("resolved_question") or message["question"], unavailable=False)
+        fields.update(answer_state=state, verification_checks=checks,
+                      verification_status="verified" if state == "VERIFIED" else "not_verified")
+        previous_evaluations = message.get("quality_evaluations") or []
+        fields["quality_evaluations"] = [*previous_evaluations, quality.evaluate(
+            message.get("resolved_question") or message["question"], fields,
+            revision=max((item["revision"] for item in previous_evaluations), default=0) + 1,
+            model_calls=[*(previous_evaluations[-1].get("model_calls", []) if previous_evaluations else []), *runs])]
         if not await repository.update_verified_message(user.id, conversation_id, message_id, fields):
             raise HTTPException(409, "This answer changed. Reload the conversation.")
         return SavedMessage(**{**message, **fields})
@@ -717,8 +908,8 @@ def _log_evidence_handoff(request_id: str | None, stage: str,
 
 
 def _quote_tokens(value: str) -> str:
-    value = unicodedata.normalize("NFKC", value).casefold()
-    return " ".join(re.findall(r"\d[\d,]*(?:\.\d+)?|[^\W\d_]+|%", value))
+    value = unicodedata.normalize("NFKC", value).casefold().replace("−", "-")
+    return " ".join(re.findall(r"(?<!\w)-?\d[\d,]*(?:\.\d+)?|[^\W\d_]+|%", value))
 
 
 def _coverage_gap_message(question: str, gaps: list[tuple[str, str]],
@@ -1121,13 +1312,15 @@ async def research_capabilities(
     request: Request,
     user: UserResponse = Depends(get_current_user),
     ) -> dict[str, bool | int]:
+    if getattr(request.app.state, "demo_mode", False):
+        return {"answer_generation": True, "retry_after_seconds": 0}
     provider = getattr(request.app.state, "answer_provider", None)
     if provider is None:
         return {"answer_generation": False, "retry_after_seconds": 0}
     available = getattr(provider, "available", None)
     return {"answer_generation": await run_in_threadpool(available) if available else True,
             "retry_after_seconds": _cooldown_seconds(request, provider)
-            if isinstance(provider, GroqAnswerProvider) else 0}
+            if isinstance(provider, OpenRouterAnswerProvider) else 0}
 
 
 async def _retrieve(payload: SearchRequest, request: Request, user: UserResponse,
@@ -1138,16 +1331,42 @@ async def _retrieve(payload: SearchRequest, request: Request, user: UserResponse
     paper = await repository.find(user.id, payload.paper_id)
     if paper is None:
         raise HTTPException(404, "Paper not found.")
-    if paper["status"] != "ready":
+    if not ready_for_research(paper):
         raise HTTPException(409, "Wait until this paper is ready.")
 
     ingestion: IngestionService = request.app.state.ingestion_service
+    provider = getattr(request.app.state, "answer_provider", None)
+    question = payload.question.strip()
+    cache_key = None
+    if (paper.get("file_hash") and paper.get("updated_at")
+            and not request.scope.get("citewise_evaluation")
+            and not (expand and isinstance(provider, OpenRouterAnswerProvider) and provider.rerank_enabled)):
+        cache_key = (ingestion, user.id, payload.paper_id, paper["file_hash"], paper["updated_at"],
+                     paper.get("embedding_model"), paper.get("chunk_count"), question, payload.limit, expand)
+        with _retrieval_cache_lock:
+            cached = _retrieval_cache.get(cache_key)
+            if cached and cached[0] > time.monotonic():
+                _retrieval_cache.move_to_end(cache_key)
+                return [chunk.model_copy() for chunk in cached[1]]
+            _retrieval_cache.pop(cache_key, None)
+
     def retrieve() -> list[ChunkResponse]:
-        question = payload.question.strip()
         embedding = ingestion.embeddings.embed([question])[0]
         broad = bool(re.search(r"\b(?:both|compar\w*|combined|together|overall|universally)\b", question, re.I))
         initial = ingestion.vectors.search(user.id, payload.paper_id, embedding, payload.limit,
                                           question=question, candidate_limit=50 if broad else 25)
+        if (expand and len(initial) == payload.limit and isinstance(provider, OpenRouterAnswerProvider)
+                and provider.rerank_enabled and provider.available()
+                and not request.scope.get("citewise_evaluation")):
+            candidates = ingestion.vectors.search(user.id, payload.paper_id, embedding, RERANK_CANDIDATES,
+                                                  question=question, candidate_limit=50 if broad else 25)
+            if len(candidates) > payload.limit:
+                try:
+                    order = provider.rerank(question, [item.text for item in candidates], payload.limit)
+                    initial = [candidates[index] for index in order]
+                except Exception as exc:
+                    logging.getLogger(__name__).info("research_rerank_unavailable error_type=%s",
+                                                     type(exc).__name__)
         subjects, dimensions = requested_coverage(question, [item.text for item in initial])
         def diagnose(stage: str, items: list[ChunkResponse]) -> list[tuple[str, str]]:
             report = coverage_report(question, [CoveragePassage(
@@ -1167,7 +1386,7 @@ async def _retrieve(payload: SearchRequest, request: Request, user: UserResponse
         if not gaps:
             return initial
         # A small number of targeted semantic queries can recover sections
-        # outside the first ranked set without sending 50 chunks to Groq.
+        # outside the first ranked set without sending 50 chunks to OpenRouter.
         topic = " ".join(sorted(VectorRepository._terms(question) - {
             "design", "methodology", "participant", "student", "sample", "setting",
             "duration", "finding", "result", "limitation", "difference", "important"}))
@@ -1196,7 +1415,14 @@ async def _retrieve(payload: SearchRequest, request: Request, user: UserResponse
         diagnose("final", list(selected.values()))
         return list(selected.values())
 
-    return await run_in_threadpool(retrieve)
+    passages = await run_in_threadpool(retrieve)
+    if cache_key is not None and passages:
+        with _retrieval_cache_lock:
+            _retrieval_cache[cache_key] = (time.monotonic() + 60, tuple(chunk.model_copy() for chunk in passages))
+            _retrieval_cache.move_to_end(cache_key)
+            if len(_retrieval_cache) > 128:
+                _retrieval_cache.popitem(last=False)
+    return passages
 
 
 @router.post("/search", response_model=SearchResponse)
@@ -1212,6 +1438,26 @@ async def search_paper(
     ])
 
 
+def _simple_generation(question: str, resolved_question: str, passages: list[str]) -> bool:
+    """Use the short route only for a standalone lookup with one selected source."""
+    if question.strip() != resolved_question or len(passages) != 1:
+        return False
+    intent = re.sub(r"^search (?:the )?web\s*:\s*", "", resolved_question, flags=re.I)
+    if len(intent.split()) > 22 or intent.count("?") > 1 or re.search(
+        r"\b(?:and|or|why|compar\w*|versus|contradict\w*|conflict\w*|"
+        r"methodolog\w*|(?:study|research|experimental) design|evaluat\w*|analy[sz]\w*|"
+        r"implications?|limitations?|interpret\w*|synthesi[sz]\w*|overall|"
+        r"differ\w*|combin\w*|across|both|total|ratio|trend|significan\w*|"
+        r"percent(?:age)? (?:change|increase|decrease)|relative|caus\w*)\b|[;\n]",
+        intent, re.I,
+    ):
+        return False
+    subjects, dimensions = requested_coverage(intent, passages)
+    return len(subjects) <= 1 and len(dimensions) <= 1 and bool(re.match(
+        r"(?:what (?:is|was|are|were|does .+ mean\b)|who (?:is|was|were)|when (?:was|did)|"
+        r"where (?:was|did)|how (?:many|long|much)|define)\s*\b", intent, re.I))
+
+
 @router.post("/ask", response_model=AskResponse)
 async def ask_paper(
     payload: AskRequest,
@@ -1219,13 +1465,18 @@ async def ask_paper(
     response: Response,
     user: UserResponse = Depends(get_current_user),
 ):
+    demo_mode = getattr(request.app.state, "demo_mode", False)
+    quality = None if demo_mode or request.scope.get("citewise_evaluation") else AnswerQuality()
     conversations: ConversationRepository = request.app.state.conversation_repository
     search_trace = SearchTrace()
-    groq_counts = {"groq_calls": 0, "groq_cache_hits": 0, "groq_attempts": 0, "groq_retries": 0, "groq_failures": 0,
-                   "groq_rate_limits": 0, "groq_server_errors": 0, "groq_network_errors": 0,
-                   "groq_rate_limit_kind": None}
-    groq_trace.set(groq_counts)
-    groq_request_id.set(payload.request_id)
+    openrouter_counts = {"openrouter_calls": 0, "openrouter_cache_hits": 0, "openrouter_attempts": 0, "openrouter_retries": 0, "openrouter_failures": 0,
+                   "openrouter_rate_limits": 0, "openrouter_server_errors": 0, "openrouter_network_errors": 0,
+                   "openrouter_rate_limit_kind": None}
+    runs: list[dict] = []
+    model_runs.set(runs)
+    openrouter_trace.set(openrouter_counts)
+    openrouter_request_id.set(payload.request_id)
+    openrouter_cache_scope.set((user.id, payload.paper_id))
     conversation = None
     if payload.conversation_id:
         conversation = await conversations.find(user.id, payload.conversation_id)
@@ -1236,15 +1487,21 @@ async def ask_paper(
             raise HTTPException(404, "Previous message not found in this conversation.")
 
     async def save_result(result: AskResponse) -> AskResponse:
-        if result.verification_status == "verified":
-            response.delete_cookie(_GROQ_COOLDOWN_COOKIE, path="/api/v1/research")
+        retryable_draft = result.verification_status == "unavailable"
+        if not demo_mode and not retryable_draft:
+            response.delete_cookie(_OPENROUTER_COOLDOWN_COOKIE, path="/api/v1/research")
         result.question = payload.question.strip()
         result.request_id = payload.request_id
-        for key, value in groq_counts.items():
+        for key, value in openrouter_counts.items():
             setattr(search_trace, key, value)
         search_trace.claim_status_counts = dict(Counter(item.status for item in result.claims))
         search_trace.verification_failures = search_trace.claim_status_counts.get("unsupported", 0)
         result.search_trace = search_trace.model_copy(deep=True)
+        state, checks = answer_report(status=result.status, answer=result.answer, claims=result.claims,
+            sources=result.sources, external=result.external_sources, question=question_for_retrieval,
+            unavailable=retryable_draft or bool(search_trace.external_search_errors))
+        result.answer_state = state
+        result.verification_status = "unavailable" if retryable_draft else "verified" if state == "VERIFIED" and not demo_mode else "not_verified"
         message = SavedMessage(
             id=uuid4().hex, question=payload.question.strip(), resolved_question=question_for_retrieval,
             status=result.status,
@@ -1252,7 +1509,11 @@ async def ask_paper(
             assessment=result.assessment, created_at=datetime.now(timezone.utc),
             claims=result.claims, search_trace=result.search_trace,
             verification_status=result.verification_status, retry_after_seconds=result.retry_after_seconds,
+            answer_state=state,
         ).model_dump(mode="json")
+        message["verification_checks"] = checks
+        if quality is not None and quality.draft is not None:
+            message["quality_evaluations"] = [quality.evaluate(question_for_retrieval, message, revision=1, model_calls=runs)]
         if payload.conversation_id:
             if not await conversations.append(user.id, payload.conversation_id, payload.paper_id, message):
                 raise HTTPException(404, "Conversation not found.")
@@ -1266,9 +1527,46 @@ async def ask_paper(
 
     question_for_retrieval = _question_with_context(payload.question, conversation,
                                                    payload.reply_to_message_id)
+    if demo_mode:
+        response.headers["X-CiteWise-Demo"] = "true"
+        if not payload.question.strip():
+            raise HTTPException(422, "Enter a question.")
+        paper_record = await _ready_recommendation_paper(request, user, payload.paper_id)
+        question_for_retrieval = payload.question.strip()
+        sample = is_sample(paper_record)
+        if sample and (external_answer := _demo_external_answer(payload.paper_id, payload.question)):
+            search_trace.accepted_external_sources = len(external_answer.external_sources)
+            return await save_result(external_answer)
+        case = next((case for case in CASES if question_key(case.question) == question_key(payload.question)), None)
+        if sample and case:
+            chunks = await run_in_threadpool(request.app.state.ingestion_service.preview, user.id, payload.paper_id,
+                                             limit=paper_record["chunk_count"])
+            chunk = sample_source(case, chunks)
+            if chunk is not None:
+                source = AnswerSource(
+                    id=f"c{chunk.chunk_index}-{chunk.content_hash[:12]}",
+                    highlight_text=sample_quote(case, chunk), document_name=paper_record["filename"], **chunk.model_dump(),
+                )
+                return await save_result(AskResponse(paper_id=payload.paper_id, status="answered",
+                    answer=f"{case.answer} [{source.id}]", sources=[source],
+                    assessment=EvidenceReview(level="sufficient", chunk_ids=[source.id]),
+                    claims=[ClaimReviewResponse(text=case.answer, section="pdf", status="supported",
+                        supporting=[ClaimQuoteResponse(source_id=source.id, quote=case.excerpt)], opposing=[],
+                        explanation="Sample claim check against the bundled PDF.", reason_code="demo_sample")]))
+        message = ("This question has no sample answer. Choose one of the suggested sample questions."
+                   if sample else "Sample answers are available for the bundled PLOS ONE paper. "
+                   "Select it for sample questions or use Find passages to explore this PDF.")
+        return await save_result(AskResponse(paper_id=payload.paper_id, status="insufficient_evidence",
+            answer=message, sources=[], assessment=EvidenceReview(level="none", chunk_ids=[],
+                missing_information="No predefined answer is available for this question and PDF.")))
+
     retrieval_payload = SearchRequest(paper_id=payload.paper_id, question=question_for_retrieval,
                                       limit=payload.limit)
     passages = await _retrieve(retrieval_payload, request, user, expand=True)
+    # Only internal evaluation requests carry this ASGI scope flag. The actual
+    # retrieved passages, not the gold answer, are captured for the report.
+    if request.scope.get("citewise_evaluation"):
+        request.state.evaluation_passages = passages
     paper_record = await request.app.state.paper_repository.find(user.id, payload.paper_id)
     provider: AnswerProvider | None = getattr(request.app.state, "answer_provider", None)
     if provider is None:
@@ -1276,6 +1574,31 @@ async def ask_paper(
     available = getattr(provider, "available", None)
     if available and not await run_in_threadpool(available):
         raise HTTPException(503, "Answer generation is not available yet.")
+
+    def with_retrieved_passages(status: int, code: str, message: str,
+                                headers: dict[str, str] | None = None, **details: str) -> HTTPException:
+        retrieved = SearchResponse(paper_id=payload.paper_id, passages=[
+            SearchPassage(**item.model_dump(),
+                          highlight_text=_evidence_excerpt(question_for_retrieval, item.text))
+            for item in passages[:payload.limit]
+        ])
+        return HTTPException(status, {"message": message, "code": code, **details, **retrieved.model_dump(mode="json")},
+                             headers={**(headers or {}), "Cache-Control": "private, no-store"})
+
+    def rate_limited(exc: AnswerRateLimitError, message: str) -> HTTPException:
+        headers = _rate_limit_headers(exc, provider)
+        detail = _rate_limit_detail(exc, message)
+        return with_retrieved_passages(429, headers=headers, **detail)
+
+    def provider_failed(stage: str, exc: Exception) -> HTTPException:
+        call = runs[-1] if runs else {}
+        request_id = payload.request_id or ""
+        logging.getLogger(__name__).warning(
+            "research_provider_failed request_id=%s stage=%s model=%s http_status=%s error_type=%s outcome=%s",
+            request_id if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_id) else "none",
+            stage, call.get("model_id"), call.get("status"),
+            type(exc).__name__, call.get("error"))
+        return with_retrieved_passages(502, "provider_unavailable", "Answer generation is temporarily unavailable.")
 
     sources = {}
     for passage in passages:
@@ -1297,8 +1620,9 @@ async def ask_paper(
     assess = getattr(provider, "assess", None)
     if assess:
         cache_key = None
-        if isinstance(provider, GroqAnswerProvider):
-            fingerprint = sha256(repr((question_for_retrieval, [(item.id, item.text) for item in evidence]))
+        if isinstance(provider, OpenRouterAnswerProvider):
+            fingerprint = sha256(repr((user.id, payload.paper_id, question_for_retrieval,
+                                       [(item.id, sources[item.id].content_hash, item.text) for item in evidence]))
                                  .encode("utf-8")).hexdigest()
             cache_key = (provider, fingerprint)
             with _assessment_cache_lock:
@@ -1309,13 +1633,39 @@ async def ask_paper(
         try:
             if assessment is None:
                 proposed = await run_in_threadpool(assess, question_for_retrieval, evidence)
+        except AnswerRateLimitError as exc:
+            raise rate_limited(exc, "Evidence assessment is temporarily rate limited.") from None
+        except Exception as exc:
+            raise provider_failed("evidence_assessment", exc) from None
+        if assessment is None:
+            try:
                 assessment = _validate_assessment(proposed, question_for_retrieval, sources,
                                                   request_id=payload.request_id)
-        except AnswerRateLimitError as exc:
-            raise HTTPException(429, "Evidence assessment is temporarily rate limited.",
-                                headers=_rate_limit_headers(exc, provider)) from None
-        except Exception as exc:
-            raise HTTPException(502, "Evidence assessment failed. Try again later.") from exc
+            except Exception as exc:
+                logging.getLogger(__name__).error("research_assessment_processing_failed error_type=%s",
+                                                  type(exc).__name__)
+                raise HTTPException(500, "Evidence processing failed. Try again later.") from None
+        used_assessment_fallback = any(call.get("stage") == "citewise_evidence_assessment" and call.get("fallback")
+                                       for call in runs)
+        if assessment is None and not used_assessment_fallback:
+            reassess = getattr(provider, "reassess", None)
+            if callable(reassess):
+                try:
+                    corrected = await run_in_threadpool(reassess, question_for_retrieval, evidence)
+                except AnswerRateLimitError as exc:
+                    raise rate_limited(exc, "Evidence assessment is temporarily rate limited.") from None
+                except Exception as exc:
+                    raise provider_failed("evidence_reassessment", exc) from None
+                try:
+                    assessment = _validate_assessment(corrected, question_for_retrieval, sources,
+                                                      request_id=payload.request_id)
+                except Exception as exc:
+                    logging.getLogger(__name__).error("research_assessment_processing_failed error_type=%s",
+                                                      type(exc).__name__)
+                    raise HTTPException(500, "Evidence processing failed. Try again later.") from None
+                safe_id = payload.request_id if payload.request_id and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", payload.request_id) else "none"
+                logging.getLogger(__name__).info("research_assessment_recovery request_id=%s accepted=%s",
+                                                 safe_id, assessment is not None)
         if cache_key is not None and assessment is not None:
             with _assessment_cache_lock:
                 _assessment_cache[cache_key] = assessment.model_copy(deep=True)
@@ -1325,48 +1675,35 @@ async def ask_paper(
         if assessment is None:
             logging.getLogger(__name__).info("research_assessment_rejected request_id=%s",
                                              payload.request_id or "none")
-            raise HTTPException(502, "The PDF evidence assessment could not be validated. Try again later.")
+            return await save_result(AskResponse(paper_id=payload.paper_id,
+                status="insufficient_evidence", answer="The retrieved passages could not be verified for this question.",
+                sources=[]))
         logging.getLogger(__name__).info("research_assessment request_id=%s level=%s source_ids=%s",
                                          payload.request_id or "none", assessment.level, assessment.chunk_ids)
         _log_evidence_handoff(payload.request_id, "assessment_accepted", assessment.chunk_ids, sources)
 
-    pdf_comparison = len(requested_coverage(question_for_retrieval,
-                         [source.text for source in sources.values()])[0]) >= 2
-    quote_coverage_gap = bool(assessment and assessment.missing_information.startswith(
-        "The selected PDF chunks contain information omitted from the cited quotes"))
-    candidate_coverage_gap = _assessment_gap_in_selected_chunks(assessment, sources)
-    if assessment and assessment.level in ("partial", "none") and not (
-            assessment.level == "partial" and (pdf_comparison or quote_coverage_gap)):
+    async def fallback_to_external(assessment: EvidenceReview,
+                                   prior_pdf: tuple[str, list[ClaimReviewResponse]] | None = None) -> AskResponse:
         pdf_sources = [sources[item] for item in assessment.chunk_ids]
-        if (not _requests_external_evidence(payload.question)
-                and (not re.search(r"\b(?:law|regulations?)\b", payload.question, re.I)
-                     or _asks_only_about_pdf(payload.question))
-                or _asks_for_paper_specific_fact(question_for_retrieval)
-                or _asks_only_about_pdf(question_for_retrieval)
-                or _follow_up_uses_pdf(payload.question, question_for_retrieval,
-                                       conversation, payload.reply_to_message_id)):
-            if candidate_coverage_gap:
-                detail = ("The selected PDF chunk contains potentially relevant information, "
-                          "but the assessment quotes did not verify: " + assessment.missing_information)
-            elif _asks_for_paper_specific_fact(question_for_retrieval):
-                detail = ("The retrieved PDF passages do not report that value. "
-                          "An external source cannot establish a statistic for this paper.")
-            elif assessment.level == "partial":
-                detail = ("The PDF supports part of this question. The assessment could not verify: "
-                          + assessment.missing_information)
-            else:
-                detail = "The retrieved PDF passages do not establish the requested information."
-            return await save_result(AskResponse(paper_id=payload.paper_id,
-                status="partially_supported" if pdf_sources else "not_mentioned", answer=detail,
-                sources=pdf_sources, assessment=assessment))
+        def no_web_answer(explanation: str) -> AskResponse:
+            if prior_pdf:
+                explanation = f"{prior_pdf[0]}\n\n{explanation}"
+            return AskResponse(paper_id=payload.paper_id,
+                status="partially_supported" if pdf_sources else "not_mentioned", answer=explanation,
+                sources=pdf_sources, assessment=assessment, claims=prior_pdf[1] if prior_pdf else [])
+
+        if (_asks_for_paper_specific_fact(payload.question)
+                and not _requests_external_evidence(payload.question)):
+            answer = no_web_answer("The retrieved passages do not establish the requested statistic for this PDF.")
+            if not pdf_sources:
+                answer.status = "insufficient_evidence"
+            return await save_result(answer)
         external_search = getattr(request.app.state, "external_search", None)
         if external_search is None or not external_search.available():
             explanation = ("The PDF supports part of the answer, but external search is not configured. "
                            f"Missing: {assessment.missing_information}" if assessment.level == "partial"
                            else "The retrieved PDF passages do not establish an answer. External search is not configured.")
-            return await save_result(AskResponse(paper_id=payload.paper_id,
-                status="partially_supported" if pdf_sources else "not_mentioned", answer=explanation,
-                sources=pdf_sources, assessment=assessment))
+            return await save_result(no_web_answer(explanation))
         query = (_external_query(question_for_retrieval, assessment.missing_information)
                  if assessment.level == "partial" else question_for_retrieval)
         async def search_once(search_query: str) -> list[ExternalEvidence]:
@@ -1395,11 +1732,15 @@ async def ask_paper(
                 else:
                     search_trace.tavily_calls += 1
                     found = await run_in_threadpool(external_search.search, search_query)
-            search_trace.retrieved_source_counts.append(len(found))
-            search_trace.accepted_external_sources += len(found)
-            return found
+            relevant = found if traced_search else [item for item in found if TavilyExternalSearch._relevant(
+                search_query, item.title, item.content)]
+            search_trace.rejected_irrelevant_sources += len(found) - len(relevant)
+            search_trace.retrieved_source_counts.append(len(relevant))
+            search_trace.accepted_external_sources += len(relevant)
+            return relevant
 
         search_failed = False
+        search_failure_reason = "External search was unavailable. This does not establish that no external information exists."
         try:
             external = await search_once(query)
         except Exception as exc:
@@ -1409,6 +1750,16 @@ async def ask_paper(
             external = []
             search_trace.retrieved_source_counts.append(0)
             search_failed = True
+            if isinstance(exc, (TimeoutError, RequestTimeout)):
+                search_failure_reason = "External search timed out. Try again later."
+            elif isinstance(exc, HTTPError) and exc.response is not None:
+                status_code = exc.response.status_code
+                if status_code in (401, 403):
+                    search_failure_reason = "External search authentication is unavailable."
+                elif status_code in (429, 432, 433):
+                    search_failure_reason = "External search is rate limited or its quota is exhausted. Try again later."
+                elif status_code >= 500:
+                    search_failure_reason = "External search provider is unavailable. Try again later."
         if not external and not search_failed and isinstance(external_search, TavilyExternalSearch):
             fallback = _fallback_query(question_for_retrieval, assessment.missing_information, query)
             if fallback and fallback not in search_trace.queries:
@@ -1422,57 +1773,35 @@ async def ask_paper(
                     search_trace.retrieved_source_counts.append(0)
                     search_failed = True
         if not external:
-            reason = ("External search was unavailable. This does not establish that no external information exists."
+            reason = (search_failure_reason
                       if search_failed else "The searches returned no usable external evidence.")
-            return await save_result(AskResponse(paper_id=payload.paper_id,
-                status="partially_supported" if pdf_sources else "not_mentioned",
-                answer=f"The PDF does not fully answer this question. {reason}",
-                sources=pdf_sources, assessment=assessment))
-        # Search snippets cannot establish the complete, current state of the law.
-        # Show the official sources without asking the model to infer legal duties from them.
-        if (re.search(r"\b(legal|law|regulation|requirements?)\b", question_for_retrieval, re.I)
-                and re.search(r"\b(india|indian)\b", question_for_retrieval, re.I)):
-            official = []
-            for item in external:
-                host = item.url.split("/", 3)[2].lower() if item.url.startswith("https://") else ""
-                description = f"{item.title} {item.content}"
-                if ((host.endswith(".gov.in") or host.endswith(".nic.in"))
-                        and re.search(r"\b(?:personal data|data protection|biometric data|consent|data collection)\b",
-                                      description, re.I)
-                        and re.search(r"\b(?:act|rules?|regulations?|law|notification)\b", description, re.I)):
-                    official.append(item)
-            if not official:
-                return await save_result(AskResponse(paper_id=payload.paper_id,
-                    status="insufficient_evidence", answer="The PDF does not answer this question, and no official legal source was found.",
-                    sources=pdf_sources, assessment=assessment))
-            cited = [_external_source(item) for item in official]
-            answer = ("Evidence from your PDF\n" +
-                ("The PDF contains related information, but does not establish the current legal requirements."
-                 if pdf_sources else "This information was not found in the retrieved passages of your uploaded paper.") +
-                "\n\nAdditional information from external sources\n"
-                "The official sources below may be relevant, but their search excerpts do not establish a complete, "
-                "current answer to this legal question. Open the sources to check the applicable rules and dates: " +
-                " ".join(f"[{item.id}]" for item in cited))
-            return await save_result(AskResponse(paper_id=payload.paper_id,
-                status="partially_supported" if pdf_sources else "not_mentioned", answer=answer,
-                sources=pdf_sources, external_sources=cited, assessment=assessment))
+            return await save_result(no_web_answer(f"The PDF does not fully answer this question. {reason}"))
         try:
             _log_evidence_handoff(payload.request_id, "generation_input", assessment.chunk_ids, sources,
                                   {item.id: item.text for item in evidence})
+            generation_options = {}
+            if isinstance(provider, OpenRouterAnswerProvider) and assessment.level == "none" and _simple_generation(
+                payload.question, question_for_retrieval, [item.content for item in external],
+            ):
+                generation_options["simple"] = True
             generated_external = await run_in_threadpool(provider.generate_with_external,
                 question_for_retrieval, [item for item in evidence if item.id in assessment.chunk_ids],
-                external, assessment.missing_information)
+                external, assessment.missing_information, **generation_options)
         except AnswerRateLimitError as exc:
-            raise HTTPException(429, "Answer generation is temporarily rate limited.",
-                                headers=_rate_limit_headers(exc, provider)) from None
+            raise rate_limited(exc, "Answer generation is temporarily rate limited.") from None
         except Exception as exc:
-            raise HTTPException(502, "External answer generation failed. Try again later.") from exc
+            raise provider_failed("external_answer_generation", exc) from None
         external_by_id = {item.id: item for item in external}
         pdf_ids = getattr(generated_external, "pdf_ids", None)
         external_ids = getattr(generated_external, "external_ids", None)
         pdf_text = getattr(generated_external, "pdf_text", None)
         external_text = getattr(generated_external, "external_text", None)
+        if quality is not None:
+            quality.capture(pdf_text if assessment.level == "partial" else "", external_text,
+                            pdf_ids, external_ids, sources, external_by_id)
         def unverified_external_answer() -> AskResponse:
+            if prior_pdf:
+                return no_web_answer("The retrieved external excerpts did not establish the missing information.")
             if assessment.level == "partial" and pdf_sources:
                 return AskResponse(paper_id=payload.paper_id, status="partially_supported",
                     answer=("The selected PDF passages contain related evidence, but the external "
@@ -1496,10 +1825,19 @@ async def ask_paper(
             checked_pdf, checked_external, claim_reviews = await _verified_sections(
                 provider, question_for_retrieval, pdf_text if assessment.level == "partial" else "",
                 external_text, pdf_ids, external_ids, sources, external_by_id,
-                request_id=payload.request_id, debug_claims=_local_claim_debug(request))
-        except AnswerRateLimitError as exc:
-            raise HTTPException(429, "Answer generated, but claim verification is temporarily unavailable. The answer was not shown.",
-                                headers=_rate_limit_headers(exc, provider)) from None
+                request_id=payload.request_id, debug_claims=_local_claim_debug(request), raise_unavailable=True,
+                quality=quality)
+        except Exception as exc:
+            if isinstance(exc, AnswerRateLimitError):
+                headers = _rate_limit_headers(exc, provider) or {}
+                if "Set-Cookie" in headers:
+                    response.headers.append("Set-Cookie", headers["Set-Cookie"])
+            draft = (f"Evidence from your PDF\n{pdf_text if assessment.level == 'partial' else ''}\n\n"
+                     f"Additional information from external sources\n{external_text}")
+            return await save_result(AskResponse(paper_id=payload.paper_id, status="insufficient_evidence",
+                answer=draft, sources=pdf_sources, external_sources=[_external_source(item) for item in external],
+                assessment=assessment, verification_status="unavailable",
+                retry_after_seconds=int(exc.retry_after or 0) if isinstance(exc, AnswerRateLimitError) else 0))
         if not claim_reviews:
             return await save_result(unverified_external_answer())
         used_ids = {quote.source_id for claim in claim_reviews for quote in claim.supporting + claim.opposing}
@@ -1520,13 +1858,19 @@ async def ask_paper(
                        "This information was not found in the retrieved passages of your uploaded paper.")
         answer = (f"Evidence from your PDF\n{pdf_section}\n\n"
                   f"Additional information from external sources\n{checked_external}")
-        reviewed_status = ("contradictory_evidence" if any(item.status == "contradicted" for item in claim_reviews)
-                           else "insufficient_evidence" if not any(item.status == "supported" for item in claim_reviews)
-                           else "partially_supported" if assessment.level == "partial" else "not_mentioned")
+        reviewed_status = _reviewed_status(claim_reviews, assessment.level == "partial", external=True)
         return await save_result(AskResponse(paper_id=payload.paper_id,
             status=reviewed_status,
             answer=answer, sources=cited_pdf, external_sources=cited_external,
             assessment=assessment, claims=claim_reviews))
+
+    pdf_comparison = len(requested_coverage(question_for_retrieval,
+                         [source.text for source in sources.values()])[0]) >= 2
+    quote_coverage_gap = bool(assessment and assessment.missing_information.startswith(
+        "The selected PDF chunks contain information omitted from the cited quotes"))
+    if assessment and assessment.level in ("partial", "none") and not (
+            assessment.level == "partial" and (pdf_comparison or quote_coverage_gap)):
+        return await fallback_to_external(assessment)
 
     if not evidence:
         return await save_result(AskResponse(paper_id=payload.paper_id, status="insufficient_evidence",
@@ -1536,16 +1880,21 @@ async def ask_paper(
     _log_evidence_handoff(payload.request_id, "generation_input", [item.id for item in evidence],
                           sources, {item.id: item.text for item in evidence})
     try:
-        generated = await run_in_threadpool(provider.generate, question_for_retrieval, evidence)
+        generation_options = {}
+        if (isinstance(provider, OpenRouterAnswerProvider) and assessment and assessment.level == "sufficient"
+                and _simple_generation(payload.question, question_for_retrieval, [item.text for item in evidence])):
+            generation_options["simple"] = True
+        generated = await run_in_threadpool(provider.generate, question_for_retrieval, evidence, **generation_options)
     except AnswerRateLimitError as exc:
-        raise HTTPException(429, "Answer generation is temporarily rate limited. Try again shortly.",
-                            headers=_rate_limit_headers(exc, provider)) from None
+        raise rate_limited(exc, "Answer generation is temporarily rate limited.") from None
     except Exception as exc:
-        raise HTTPException(502, "Answer generation failed. Try again later.") from exc
+        raise provider_failed("research_generation", exc) from None
 
     answer = getattr(generated, "text", None)
     evidence_ids = getattr(generated, "evidence_ids", None)
     status = getattr(generated, "status", None)
+    if quality is not None:
+        quality.capture(answer, "", evidence_ids, [], sources, {})
     logging.getLogger(__name__).info("research_generation request_id=%s status=%s source_ids=%s",
                                      payload.request_id or "none", status, evidence_ids)
     if status == "not_mentioned":
@@ -1575,7 +1924,7 @@ async def ask_paper(
         checked_pdf, _, claim_reviews = await _verified_sections(
             provider, question_for_retrieval, answer.strip(), "", cited, [],
             {item: sources[item] for item in cited}, {}, request_id=payload.request_id,
-            debug_claims=_local_claim_debug(request), raise_unavailable=True)
+            debug_claims=_local_claim_debug(request), raise_unavailable=True, quality=quality)
     except AnswerRateLimitError as exc:
         headers = _rate_limit_headers(exc, provider) or {}
         if "Set-Cookie" in headers:
@@ -1622,6 +1971,15 @@ async def ask_paper(
             labels = ", ".join(f"{subject + ' ' if subject else ''}{dimension}"
                                 for subject, dimension in unresolved_parts)
             checked_pdf = (f"{checked_pdf} The cited claims do not fully verify: {labels}.".strip())
+    if status == "partially_supported":
+        external_search = getattr(request.app.state, "external_search", None)
+        if external_search is not None and external_search.available():
+            missing = (assessment.missing_information if assessment and assessment.missing_information
+                       else ", ".join(comparison_gaps) or "Some requested information remains unverified.")
+            reviewed_ids = [item for item in cited if item in used_ids]
+            review = EvidenceReview(level="partial" if reviewed_ids else "none",
+                                    chunk_ids=reviewed_ids, missing_information=missing)
+            return await fallback_to_external(review, (checked_pdf, claim_reviews))
     logging.getLogger(__name__).info("research_verification request_id=%s response_status=%s claim_statuses=%s source_ids=%s",
                                      payload.request_id or "none", status,
                                      [item.status for item in claim_reviews], sorted(used_ids))

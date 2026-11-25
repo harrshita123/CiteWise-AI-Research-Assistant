@@ -1,26 +1,27 @@
 from functools import cached_property
+from hashlib import sha256
 from pathlib import Path
 
 from ..config import Settings
 from ..providers.embeddings import LocalEmbeddings
 from ..paper_models import ChunkResponse
 from ..repositories.vectors import VectorRepository
-from .pdf_processing import create_chunks, extract_pages
+from .pdf_processing import PageText, create_chunks, extract_pages
 from .pdf_storage import CloudinaryPdfStorage, LocalPdfStorage
 
 
 class IngestionService:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.embeddings = LocalEmbeddings(settings.storage_directory / "models")
+        self.embeddings = LocalEmbeddings(settings.data_directory / "models")
 
     @cached_property
     def vectors(self) -> VectorRepository:
-        return VectorRepository(self.settings.storage_directory / "chroma")
+        return VectorRepository(self.settings.data_directory / "chroma")
 
     @cached_property
     def local_storage(self) -> LocalPdfStorage:
-        return LocalPdfStorage(self.settings.storage_directory / "uploads")
+        return LocalPdfStorage(self.settings.data_directory / "uploads")
 
     @cached_property
     def cloudinary_storage(self) -> CloudinaryPdfStorage:
@@ -37,8 +38,17 @@ class IngestionService:
         # Existing local papers still use their server-generated file path.
         return self.local_storage.path(paper_id)
 
-    def process(self, owner_id: str, paper_id: str, content: bytes) -> dict[str, int]:
-        page_count, pages = extract_pages(
+    def read_original(self, paper: dict) -> bytes:
+        limit = self.settings.max_pdf_size_mb * 1024 * 1024
+        storage = self.storage_for(paper.get("storage_provider", "local"))
+        content = storage.read(paper["_id"], limit)
+        if len(content) > limit or sha256(content).hexdigest() != paper["file_hash"]:
+            raise ValueError("Stored PDF does not match the uploaded document.")
+        return content
+
+    def process(self, owner_id: str, paper_id: str, content: bytes,
+                prepared: tuple[int, list[PageText]] | None = None) -> dict[str, int]:
+        page_count, pages = prepared or extract_pages(
             content, self.settings.max_pdf_pages, self.settings.max_pdf_characters,
         )
         chunks = create_chunks(pages, self.embeddings.tokenizer())
@@ -49,7 +59,8 @@ class IngestionService:
             embeddings = self.embeddings.embed([chunk.text for chunk in batch])
             self.vectors.save(owner_id, paper_id, batch, embeddings)
 
-        self.cloudinary_storage.save(paper_id, content)
+        storage = self.local_storage if self.settings.citewise_demo_mode else self.cloudinary_storage
+        storage.save(paper_id, content)
         return {"page_count": page_count, "chunk_count": len(chunks)}
 
     def cleanup(self, owner_id: str, paper_id: str, provider: str = "local") -> None:

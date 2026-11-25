@@ -2,12 +2,14 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.dependencies import get_current_user
 from app.models import UserResponse
+from app.providers.answers import AnswerRateLimitError
 from app.repositories.vectors import VectorRepository
 from app.routers.research import router
 from app.services.pdf_processing import TextChunk, extract_pages, create_chunks, PdfValidationError
@@ -109,11 +111,36 @@ class QuestionRecommendationTests(unittest.TestCase):
         self.assertNotIn("What objective does the paper describe?", [item.text for item in result])
         self.assertEqual(self.service.starter("bob", "paper-1", self.paper), [])
 
-    def test_missing_provider_reports_error_instead_of_caching_empty_results(self):
+    def test_missing_provider_uses_document_backed_fallback(self):
+        fallback = QuestionRecommendationService(self.vectors, Embeddings().embed, None)
+        items = fallback.starter("alice", "paper-1", self.paper)
+        self.assertEqual({item.source.page_number for item in items}, {1, 2, 3, 4})
+        self.assertTrue(fallback.used_local_fallback)
+        self.assertEqual(fallback.starter("bob", "paper-1", self.paper), [])
+
+    def test_rate_limit_uses_grounded_fallback_without_repeating_provider_request(self):
+        provider = Mock(spec=Provider)
+        provider.available.return_value = True
+        provider.recommend_questions.side_effect = AnswerRateLimitError("60")
+        service = QuestionRecommendationService(self.vectors, Embeddings().embed, provider)
+        first = service.starter("alice", "paper-1", self.paper)
+        self.assertTrue(first)
+        self.assertEqual(service.starter("alice", "paper-1", self.paper), first)
+        provider.recommend_questions.assert_called_once()
+
+    def test_missing_provider_returns_error_when_no_local_question_is_supported(self):
+        self.vectors.save("alice", "sparse", [TextChunk(0, 1, "Acknowledgements.", "sparse")], [[0, 0, 0, 1]])
         fallback = QuestionRecommendationService(self.vectors, Embeddings().embed, None)
         with self.assertRaises(RuntimeError):
-            fallback.starter("alice", "paper-1", {**self.paper, "file_hash": "file-without-provider"})
+            fallback.starter("alice", "sparse", {"file_hash": "sparse", "chunk_count": 1})
         self.assertEqual(len(QuestionRecommendationService._cache), 0)
+
+    def test_local_fallback_skips_bibliography_even_with_legacy_section_metadata(self):
+        text = "Smith, A., and Green, B. A reference approach improves accuracy on an evaluation."
+        self.vectors.save("alice", "biblio", [TextChunk(0, 1, text, "ref", "Article")], [[0, 0, 0, 1]])
+        service = QuestionRecommendationService(self.vectors, Embeddings().embed, None)
+        with self.assertRaises(RuntimeError):
+            service.starter("alice", "biblio", {"file_hash": "biblio", "chunk_count": 1})
 
     def test_distinct_extracted_pdfs_produce_scoped_questions(self):
         class TopicProvider:

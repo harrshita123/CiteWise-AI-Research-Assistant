@@ -1,0 +1,14 @@
+{$CITEWISE_DOMAIN} {
+	encode zstd gzip
+
+	@backend path /api/* /health
+	handle @backend {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle {
+		root * {$CITEWISE_WEB_ROOT:/opt/citewise/frontend/dist}
+		try_files {path} /index.html
+		file_server
+	}
+}

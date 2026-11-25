@@ -1,0 +1,406 @@
+{
+  "papers": {
+    "gravitational-wave": {
+      "title": "GW190521: A Binary Black Hole Merger with a Total Mass of 150 M⊙",
+      "authors": "R. Abbott et al. (LIGO Scientific Collaboration and Virgo Collaboration)",
+      "source": "https://doi.org/10.1103/PhysRevLett.125.101102",
+      "license": "CC BY 4.0",
+      "pdf_sha256": "4d6661f18168267249b3ca043b0692d88376c9db9b3d9146a9500763f7b438a7",
+      "chunks": [
+        {
+          "page": 1,
+          "text": "Editors' Suggestion Featured in Physics GW190521: A Binary Black Hole Merger with a Total Mass of 150 M⊙ R. Abbott et al.* (LIGO Scientific Collaboration and Virgo Collaboration) (Received 30 May 2020; revised 19 June 2020; accepted 9 July 2020; published 2 September 2020) On May 21, 2019 at 03:02:29 UTC Advanced LIGO and Advanced Virgo observed a short duration gravitational-wave signal, GW190521, with a three-detector network signal-to-noise ratio of 14.7, and an estimated false-alarm rate of 1 in 4900 yr using a search sensitive to generic transients. If GW190521 is from a quasicircular binary inspiral, then the detected signal is consistent with the merger of two black holes with masses of 85þ21 −14 M⊙and 66þ17 −18 M⊙(90% credible intervals). We infer that the primary black hole mass lies within the gap produced by (pulsational) pair-instability supernova processes,"
+        },
+        {
+          "page": 1,
+          "text": "). We infer that the primary black hole mass lies within the gap produced by (pulsational) pair-instability supernova processes, with only a 0.32% probability of being below 65 M⊙. We calculate the mass of the remnant to be 142þ28 −16 M⊙, which can be considered an intermediate mass black hole (IMBH). The luminosity distance of the source is 5.3þ2.4 −2.6 Gpc, corresponding to a redshift of 0.82þ0.28 −0.34. The inferred rate of mergers similar to GW190521 is 0.13þ0.30 −0.11 Gpc−3 yr−1. DOI: 10.1103/PhysRevLett.125.101102 quasicircular binary BHs indicate that a precessing orbital plane is slightly favored over a fixed plane. The observation of the ringdown signal from the remnant BH provides estimates for the final mass and spin that are consistent with those from the full"
+        },
+        {
+          "page": 1,
+          "text": "plane. The observation of the ringdown signal from the remnant BH provides estimates for the final mass and spin that are consistent with those from the full waveform analysis. Introduction.—Advanced LIGO [1] and Advanced Virgo [2] have demonstrated a new means to observe the Universe through the detection of gravitational waves (GWs). In their first two observing runs (O1 and O2), the LIGO Scientific Collaboration and the Virgo Collaboration (LVC) have reported the detection of GWs from 10 binary black hole (BH) mergers, and a binary neutron star inspiral [3,4]. The third observing run (O3) started on April 1, 2019, and was suspended on March 27, 2020; numerous public alerts pertaining to possible detections have been sent to the astronomical community [5], with three confirmed detec- tions [6–8]. It is predicted that stars with a helium core mass in the range of ∼32–64 M⊙are subject to pulsational pair instability, leaving behind remnants with mass"
+        },
+        {
+          "page": 1,
+          "text": "–28], or via direct collapse of a stellar merger between an evolved star and a main sequence companion [29,30]. The discovery of GW150914 [9] and subsequent events has revealed a population of binary BHs with total masses between ∼19 and 84 M⊙, with component masses ranging from ∼8 to 50 M⊙[3]. Signals consistent with heavier BHs (e.g., 170817 þ 03∶02∶46UTC) have also been reported in [10–12], albeit with a non-negligible chance of having an instrumental origin. For the parametrized population mod- els considered in [13] it was inferred that no more than 1% of primary BH masses in merging binaries are greater than 45 M⊙. In this Letter we expand this mass range with the confident detection of GW190521, a GW signal consistent with a binary BH merger of total mass ∼150 M⊙, leaving behind a ∼140 M⊙ remnant. Waveform models for *Full author list given at the end of the Letter. Published by the American"
+        },
+        {
+          "page": 1,
+          "text": "∼150 M⊙, leaving behind a ∼140 M⊙ remnant. Waveform models for *Full author list given at the end of the Letter. Published by the American Physical Society under the terms of the Creative Commons Attribution 4.0 International license. Further distribution of this work must maintain attribution to the author(s) and the published article’s title, journal citation, and DOI. BHs of mass 102–105 M⊙, more massive than stellar mass BHs and lighter than supermassive BHs (SMBHs), are traditionally designated IMBHs [31–33]. A conclusive observation of these objects has thus far remained elusive, despite indirect evidence. These include observations of central BHs in galaxies, kinematical measurements of massive star clusters, scaling relations between the mass of the central SMBH and their host galaxies, and the mass range of globular clusters [34]. The LVC has also pre- viously searched for binaries of IMBHs explicitly in their GW data, for example [35–37], obtaining null results and"
+        },
+        {
+          "page": 1,
+          "text": "- viously searched for binaries of IMBHs explicitly in their GW data, for example [35–37], obtaining null results and establishing an upper limit of 0.2 Gpc−3 yr−1 on their 0031-9007=20=125(10)=101102(17) Published by the American Physical Society"
+        },
+        {
+          "page": 2,
+          "text": "coalescence rate [38]. The remnant of GW190521 fulfills the above definition of an IMBH. A second significant GW trigger occurred on the same day at 07:43:59 UTC, S190521r [48]. Despite the short time separation, the inferred sky positions of GW190521 and S190521r are disjointed at high confidence, and so the events are not related by gravitational lensing. Further discussions pertaining to gravitational lensing and GW190521 are presented in the companion paper [39]. GW190521, shown in Fig. 1, is a short transient signal with a duration of approximately 0.1 s and around four cycles in the frequency band 30–80 Hz. A frequency of 60 Hz at the signal peak and the assumption that the source is a compact binary merger imply a massive system. GW190521 was detected by searches for quasicircular binary coalescences, and there is no evidence in the data"
+        },
+        {
+          "page": 2,
+          "text": "system. GW190521 was detected by searches for quasicircular binary coalescences, and there is no evidence in the data for significant departures from such a signal model. However, for any transient with high inferred masses, there are few cycles observable in ground-based detectors, and therefore alternative signal models may also fit the data. This is further addressed in the companion paper [39] that also provides details about physical parameter estimation, and the astrophysical implications of the observation of GWs from this massive system. Data.—The LIGO and Virgo strain data are conditioned prior to their use in search pipelines and parameter estimation analyses. During online calibration of the data [53], narrow spectral features (lines) are subtracted using auxiliary witness sensors. Specifically, we remove from the data the 60 Hz U.S. mains power signature (LIGO), as well as calibration lines (LIGO and Virgo) that are intentionally injected into the detectors to measure the instruments’ responses. During online calibration"
+        },
+        {
+          "page": 2,
+          "text": "calibration lines (LIGO and Virgo) that are intentionally injected into the detectors to measure the instruments’ responses. During online calibration of Virgo data, broad- band noise in the 40–1000 Hz frequency range is subtracted from the data [54]. The noise-subtracted data produced by the online calibration pipelines are used by online search pipelines and initial parameter estimation analyses. Observation.—On May 21, 2019 at 03:02:29 UTC, the LIGO Hanford (LHO), LIGO Livingston (LLO), and Virgo observatories detected a coincident transient signal. A matched-filter search for compact binary mergers, PYCBC LIVE [40,41,42], reported the transient with a network signal-to-noise ratio (SNR) of 14.5 and a false- alarm rate of 1 in 8 yr, triggering the initial alert. A weakly modeled transient search based on coherent wave burst (CWB) [43] in its IMBH search configuration [35]"
+        },
+        {
+          "page": 2,
+          "text": "the initial alert. A weakly modeled transient search based on coherent wave burst (CWB) [43] in its IMBH search configuration [35] reported a signal with a network SNR of 15.0 and a false-alarm rate lower than 1 in 28 yr. Two other matched-filter pipelines, SPIIR [44] and GSTLAL [45], found consistent candidates albeit with higher false-alarm rates. The identification, localization, and classification of the transient as a binary BH merger were reported publicly within ≈6 min, with the candidate name S190521g [46,47]. Subsequent to the subtraction conducted within the online calibration pipeline, we perform a secondary offline subtraction [55] on the LIGO data with the goal of FIG. 1. The GW event GW190521 observed by the LIGO Hanford (left), LIGO Livingston (middle), and Virgo (right) detectors. Times are shown relative to May 21, 2019 at 03:02:"
+        },
+        {
+          "page": 2,
+          "text": ", LIGO Livingston (middle), and Virgo (right) detectors. Times are shown relative to May 21, 2019 at 03:02:29 UTC. The top row displays the time-domain detector data after whitening by each instrument’s noise amplitude spectral density (light blue lines); the point estimate waveform from the CWB search [43] (black lines); the 90% credible intervals from the posterior probability density functions of the waveform time series, obtained via Bayesian inference (LALINFERENCE [49]) with the NRSur7dq4 binary BH waveform model [50] (orange bands), and with a generic wavelet model (BayesWave [51], purple bands). The ordinate axes are in units of noise standard deviations. The bottom row displays the time- frequency representation of the whitened data using the Q transform [52]."
+        },
+        {
+          "page": 3,
+          "text": "Detection significance.—After the identification by the low-latency analyses described above, GW190521 was also identified by offline analyses. These analyze strain data with improved calibration and updated data-quality vetoes, which are not available in low latency and hence update the low-latency results. The offline analyses use the CWB [43,59,60], GSTLAL [45,61–65], and PYCBC [40,66–71] pipelines. CWB searches for short transient signals with minimal assumptions on their waveform. GSTLAL and PYCBC search for coalescences of compact objects using matched filtering with banks of quasicircular, quadrupolar- mode-only, nonprecessing templates [72–78]. removing nonlinear sidebands around the U.S. mains power frequency, caused by low frequency modulation of the 60 Hz noise coupling. Since the subtraction of these sidebands is not expected to significantly improve the sensitivity of search algorithms,"
+        },
+        {
+          "page": 3,
+          "text": "modulation of the 60 Hz noise coupling. Since the subtraction of these sidebands is not expected to significantly improve the sensitivity of search algorithms, it is only used in offline parameter estimation of GW190521. Although GW190521 demonstrates a peak frequency of about 60 Hz, there is no evidence that the power mains contribute coherent power to the recovered signal. Voltage monitors and magnetometers installed at each LIGO site show no evidence of significant power fluctuations at the time of the event. These sensors are more sensitive to mains voltage transients than the interferometers are, detecting voltage fluctuations that are much smaller than those that produce transient noise in the strain data. At the time of GW190521, the LHO, LLO, and Virgo detectors were observing in their nominal operational O3 state. Low-latency data quality checks [56] did not indicate any transient noise in the vicinity of this event. Four minutes after GW190521, LHO microphones recorded the sound of a nearby helicopter,"
+        },
+        {
+          "page": 3,
+          "text": "noise in the vicinity of this event. Four minutes after GW190521, LHO microphones recorded the sound of a nearby helicopter, which also affected the GW strain data. This noise does not impact the confidence of the detection and the affected data are not used for parameter estimation. More thorough analyses performed at higher latency [3,56] find no evidence that GW190521 is due to, or influenced by, instrumental or environmen- tal noise. We performed the offline CWB analyses (see the Supplemental Material [79]) using two detector configu- rations: one restricted to the LIGO detectors, and one including Virgo as well. These two analyses identified GW190521 with network SNRs of 14.4 and 14.7, respec- tively, and with event parameters well within the limits defined by the analysis selection cuts. The LIGO-only analysis was used to establish the false-alarm rate for GW190521. The analysis including Virgo produced the"
+        },
+        {
+          "page": 3,
+          "text": "The LIGO-only analysis was used to establish the false-alarm rate for GW190521. The analysis including Virgo produced the waveform reconstruction. The GW190521 false-alarm rate was estimated from the analysis of time-shifted LIGO data. The background is equivalent to 9800 yr of observation and contains only two events ranked higher than GW190521, both consistent with random coincidences of short duration (∼1 cycle) glitches observed in the LIGO frequency band 20–100 Hz. The estimated background results in a false- alarm rate of 1 in 4900 yr for GW190521, which constitutes a confident detection of a GW transient. The offline analysis conducted by GSTLAL (see the Supplemental Material [79]) identified GW190521 with a network matched-filter SNR of 14.7 and a false-alarm rate of 1 in 829 yr. The large difference in GSTLAL significance reported by its online and offline configurations is due to an improvement"
+        },
+        {
+          "page": 3,
+          "text": "rate of 1 in 829 yr. The large difference in GSTLAL significance reported by its online and offline configurations is due to an improvement in the template bank during O3 that greatly enhanced GSTLAL’s sensitivity to mergers of high-mass compact objects. The offline analysis performed by PYCBC (see Supplemental Material [79]) identified GW190521 with a network matched-filter SNR of 12.6 and a false-alarm rate of 1 in 0.94 yr. The smaller SNR and relatively high false- alarm rate are due to the sparseness of PYCBC’s template bank in the parameter region of GW190521, coupled with the fact that instrumental transients cause different high- mass templates to produce very different rates of high- SNR triggers. The Supplemental Material [79] describes PYCBC’s response to GW190521 in greater detail. To further confirm that GW190521 is not a noise artifact, we followed the treatment in [3"
+        },
+        {
+          "page": 3,
+          "text": "0521 in greater detail. To further confirm that GW190521 is not a noise artifact, we followed the treatment in [3,56] and investigated potential sources of nonstationary noise typically found in the same frequency band measured for GW190521. The false-alarm rates calculated by the search pipelines estimate the rate of random coincidences of all glitches from the analysis period. Subsequent evaluation of the background noise relevant to an event does not change its calculated false-alarm rate, but serves solely as an event validation procedure. During local daytime hours, the LLO detector exhibits nonstationary noise that is consistent with scattered light due to excess ground motion in the 1–10 Hz band [3]. It produces a variation of the detector noise below 50 Hz, appearing as a periodic sequence of short duration tran- sients. A similar type of noise is also observed in the LHO detector but at significantly lower rate. GW190521 was detected at 03:02:29 UTC, at which time the 1–10 Hz ground"
+        },
+        {
+          "page": 3,
+          "text": "at significantly lower rate. GW190521 was detected at 03:02:29 UTC, at which time the 1–10 Hz ground motion was low and the GW strain data are not exhibiting the characteristic nonstationarity associated with excessive scattered light. Both detectors also exhibit populations of short duration, band-limited transients (blip glitches) [57,58], which often demonstrate a characteristic frequency of ∼50 Hz. These transients are not found in coincidence between the LHO and LLO detectors (except by random occurrence) and GW190521 does not demon- strate the typical frequency-domain power distribution of blip glitches. The most massive binary BH merger previously reported by the LVC, GW170729, had the same ordering of significances in CWB, GSTLAL, and PYCBC as GW190521, and a simulation campaign showed that larger significances in CWB for such heavy BH mergers are not uncommon [3]. Matched-filter searches based on"
+        },
+        {
+          "page": 3,
+          "text": "a simulation campaign showed that larger significances in CWB for such heavy BH mergers are not uncommon [3]. Matched-filter searches based on quasicir- cular nonprecessing templates and CWB have also been"
+        },
+        {
+          "page": 4,
+          "text": "surrogate model NRSur7dq4 [50], the effective-one-body model SEOBNRv4PHM [83,84], and the phenomenologi- cal model IMRPhenomPv3HM [85]. To compute the evidence for the presence of higher-order modes, orbital precession and nonzero spin, we also compared the data with the aforementioned models after removing these effects from the models. We analyzed 8 s of data around the time of GW190521. We impose uniform priors on the redshifted component masses, on the individual spin magnitudes and on the square of the luminosity distance. We have checked that imposing an uniform-in-co-moving- volume prior changes the results by less than 1%. We impose an isotropic prior on the source and the spin orientations. We produce posterior distributions margin- alized over calibration uncertainties. For the NRSur7dq4 and IMRPhenomPHM runs, we made use of the LALIN"
+        },
+        {
+          "page": 4,
+          "text": "over calibration uncertainties. For the NRSur7dq4 and IMRPhenomPHM runs, we made use of the LALINFERENCE software package [49] while the SEOBNRv4PHM runs were done using the RIFTalgorithm [86]. We find that despite differences in how these wave- form models are computed, and the fact that we needed to sample over parameters outside their calibration regions [87], all yield broadly consistent results [39]. In addition, direct comparison of the data to numerical relativity simulations [88–90], using the RIFT algorithm, yields consistent results. In the following we quote results obtained using the NRSur7dq4 model. This choice is motivated by this being the only model that has been calibrated to numerical simulations of precessing BH TABLE I. Parameters of GW190521 according to the NRSur7dq4 waveform model. We quote median values with 90% credible intervals that include statistical errors. Parameter compared using broader simulations of heavy BH mergers"
+        },
+        {
+          "page": 4,
+          "text": "q4 waveform model. We quote median values with 90% credible intervals that include statistical errors. Parameter compared using broader simulations of heavy BH mergers, including precession and higher-order multipole moments, also concluding that CWB is often more sensitive [80,81]. We performed a similar simulation campaign for GW190521 in order to further understand the different significances. We simulated thousands of signals compat- ible with the parameters inferred for the event under the assumption of a quasicircular BH merger, using the NRSur7dq4 waveform model described in the next section, which includes precession and higher-order multipole moments. The simulated sources have merger times dis- tributed uniformly over several days surrounding GW190521, so as to sample many different realizations of the detector noise. The right ascensions have been correspondingly corrected in order to cancel the effect of Earth’s rotation, which would lead to different projections of the strain polarizations on the detectors. We added the signals"
+        },
+        {
+          "page": 4,
+          "text": "order to cancel the effect of Earth’s rotation, which would lead to different projections of the strain polarizations on the detectors. We added the signals into the data surrounding the event, reran the search pipelines with the same configuration used for the offline analysis, and counted the number of signals recovered by each pipeline. CWB, GSTLAL, and PYCBC recovered, respectively, 36%, 45%, and 11% of the simulated signals at a false-alarm rate better than 1 in 4900 yr. The fraction of signals found at a false-alarm rate in CWB better than 1 in 4900 yr and a false-alarm rate in PYCBC worse than 1 in 0.94 yr is 2.7%, which is small but not negligible. The fraction found at a false-alarm rate in CWB better than 1 in 4900 yr and a false-alarm rate in GSTLAL worse than 1 in 829 yr is 7.8%. We conclude that the outputs of CWB, GS"
+        },
+        {
+          "page": 4,
+          "text": "alarm rate in GSTLAL worse than 1 in 829 yr is 7.8%. We conclude that the outputs of CWB, GSTLAL, and PYCBC are fully consistent with expectations for a qua- sicircular binary merger signal with the parameters of GW190521. The reported false-alarm rates do not include a trials factor for the number of analyses performed. If one were to choose a single representative false-alarm rate, one should use the CWB rate multiplied by a trials factor of 3, resulting from the conservative assumption [37,38] that CWB, GSTLAL, and PYCBC are equally sensitive and statistically independent. The resulting rate would still point to a significant detection. Primary mass 85þ21 −14 M⊙ Secondary mass 66þ17 −18 M⊙ Primary spin magnitude 0.69þ0.27 −0.62 Secondary spin magnitude 0.73þ0.24 −0.64 Total mass 150þ29 −17 M⊙ Mass ratio (m2=m1 ≤1) 0.79þ0"
+        },
+        {
+          "page": 4,
+          "text": "þ0.24 −0.64 Total mass 150þ29 −17 M⊙ Mass ratio (m2=m1 ≤1) 0.79þ0.19 −0.29 Effective inspiral spin parameter (χeff) 0.08þ0.27 −0.36 Effective precession spin parameter (χp) 0.68þ0.25 −0.37 Luminosity Distance 5.3þ2.4 −2.6 Gpc Redshift 0.82þ0.28 −0.34 Final mass 142þ28 −16 M⊙ Final spin 0.72þ0.09 −0.12 P (m1 < 65 M⊙) 0.32% Astrophysical source.—GW190521 is qualitatively dif- ferent from previous detections [3,6–8] due to the small number of cycles and maximum frequency in the sensitive band of the detectors. Hence, its astrophysical interpreta- tion as a quasicircular compact binary merger warrants more discussion than previous events. Alternative"
+        },
+        {
+          "page": 4,
+          "text": "detectors. Hence, its astrophysical interpreta- tion as a quasicircular compact binary merger warrants more discussion than previous events. Alternative scenar- ios, such as an eccentric collision [82], become more relevant and are discussed in the companion paper [39]. Nevertheless, the quasicircular BH merger scenario remains the most plausible and we will proceed under this assumption in the rest of this Letter. log10 Bayes factor for orbital precession 1.06þ0.06 −0.06 log10 Bayes factor for nonzero spins 0.92þ0.06 −0.06 log10 Bayes factor for higher harmonics −0.38þ0.06 −0.06 We performed Bayesian parameter inference on GW190521 using three waveform models for quasicircular binary BHs including the effects of higher order multipole moments and precession. These are the numerical relativity"
+        },
+        {
+          "page": 5,
+          "text": "binaries. The NRSur7dq4 results are summarized in Table I. Results for all three models are presented in the companion paper [39]. Figure 2 shows our estimated 90% credible regions for the individual masses of GW190521. We estimate indivi- dual components with ðm1; m2Þ ¼ ð85þ21 −14; 66þ17 −18Þ M⊙and a total mass 150þ29 −17 M⊙. This makes GW190521 the most massive binary BH observed to date, as expected from its short duration and low peak frequency. To quantify compatibility with the PISN mass gap, we find the probability of the primary component being below 65 M⊙to be 0.32%. The estimated mass and dimensionless spin magnitude of the remnant object are Mf ¼ 142þ28 −16 M⊙ and χf ¼ 0.72þ0.09 −0.12 respectively. The posterior for Mf shows no support below 100 M⊙, making the remnant the first conclusive direct observation of an IMBH. FIG. 2"
+        },
+        {
+          "page": 6,
+          "text": "that the component masses and spins of GW190521 are representative of a population of merging binaries, we estimate a merger rate 0.13þ0.30 −0.11 Gpc−3 yr−1 [39], consistent with the prior upper bounds set in [38]. Waveform reconstruction.—GW190521 waveform reconstructions are obtained through a templated LALINFERENCE analysis [49], and two signal-agnostic analyses, CWB [43,114], and BayesWave [51,115]. Both signal-agnostic analyses reconstruct signal waveforms as a linear combination of wavelets: CWB obtains point esti- mate waveforms with the constrained maximum likelihood FIG. 4. Posterior distributions for the luminosity distance and the inclination angle of GW190521, according to the NRSur7dq4 waveform model. The inclination angle indicates the angle between the line-of-sight and the total angular momentum of the binary. For nonprecessing binaries,"
+        },
+        {
+          "page": 7,
+          "text": ".22 −0.48. All quoted values correspond to median and 90% credible intervals. The grey contour in Fig. 5 shows the corre- sponding posterior two-dimensional 90% credible region. Accounting for redshift, these results are consistent with the full-waveform analysis when using NR fits to predict the remnant quantities [50,110,122–125]. The correspond- ing 90% credible region is shown in blue in the same Fig. 5. Additional detailed investigations are reported in the companion paper [39]. Summary.—GW190521 is a short duration signal con- sistent with a binary BH merger. According to state of the −16 M⊙, making this a direct observation of the formation of an IMBH. The large individual and total masses of GW190521, and the low likelihood that the primary originated from a stellar collapse given theoretical constraints on supernova physics, strongly suggest a differ- ent formation channel from BH binaries previously reported. The remnant ringdown signal is compatible with the"
+        }
+      ],
+      "queries": [
+        {
+          "category": "numerical",
+          "question": "What probability did the authors estimate that the primary component was below 65 solar masses?",
+          "labels": [
+            {
+              "chunk": 1,
+              "quote": "0.32% probability of being below 65 M⊙"
+            },
+            {
+              "chunk": 24,
+              "quote": "P (m1 < 65 M⊙) 0.32%"
+            },
+            {
+              "chunk": 26,
+              "quote": "component being below 65 M⊙to be 0.32%"
+            }
+          ]
+        },
+        {
+          "category": "methodology",
+          "question": "How was the background used to estimate the false-alarm rate for the generic transient search?",
+          "labels": [
+            {
+              "chunk": 14,
+              "quote": "estimated from the analysis of time-shifted LIGO data"
+            }
+          ]
+        },
+        {
+          "category": "factual_lookup",
+          "question": "How many seconds of data around the event were analyzed for parameter inference?",
+          "labels": [
+            {
+              "chunk": 19,
+              "quote": "We analyzed 8 s of data around the time of GW190521"
+            }
+          ]
+        },
+        {
+          "category": "synthesis",
+          "question": "What was the estimated remnant mass and what was the estimated generic transient false-alarm rate?",
+          "labels": [
+            {
+              "chunk": 0,
+              "quote": "estimated false-alarm rate of 1 in 4900 yr"
+            },
+            {
+              "chunk": 1,
+              "quote": "mass of the remnant to be 142þ28 −16 M⊙"
+            },
+            {
+              "chunk": 14,
+              "quote": "false- alarm rate of 1 in 4900 yr"
+            },
+            {
+              "chunk": 26,
+              "quote": "remnant object are Mf ¼ 142þ28 −16 M⊙"
+            }
+          ]
+        },
+        {
+          "category": "evidence_gap",
+          "question": "Why could other waveform interpretations fit this particular high-mass signal?",
+          "labels": [
+            {
+              "chunk": 7,
+              "quote": "there are few cycles observable in ground-based detectors, and therefore alternative signal models may also fit the data"
+            }
+          ]
+        },
+        {
+          "category": "absent",
+          "question": "What proportion of randomly assigned human participants discontinued their medication?",
+          "labels": [],
+          "absence_reason": "The complete paper addresses a different population and phenomenon and contains no observations of this kind."
+        }
+      ]
+    },
+    "sedentary-review": {
+      "title": "Efficacy, characteristics, behavioural models and behaviour change strategies, of non-workplace interventions specifically targeting sedentary behaviour",
+      "authors": "Fiona Curran et al.",
+      "source": "https://doi.org/10.1371/journal.pone.0256828",
+      "license": "CC BY 4.0",
+      "pdf_sha256": "1ea9dc0bb6f084e7036ea828a769282117f3808b6d5a8d14f070b320c4298278",
+      "chunks": [
+        {
+          "page": 1,
+          "text": "Abstract Background Citation: Curran F, Blake C, Cunningham C, Perrotta C, van der Ploeg H, Matthews J, et al. (2021) Efficacy, characteristics, behavioural models and behaviour change strategies, of non- workplace interventions specifically targeting sedentary behaviour; a systematic review and meta-analysis of randomised control trials in healthy ambulatory adults. PLoS ONE 16(9): e0256828. https://doi.org/10.1371/journal. pone.0256828 Editor: Lisa Susan Wieland, University of Maryland School of Medicine, UNITED STATES Received: April 5, 2021 Sedentary behaviour (SB) research has grown exponentially but efficacy for interventions to reduce sedentary behaviour is often contaminated by interventions primarily or co-targeting other behaviours and outcomes. The primary aim of this research therefore, was to system- atically review the efficacy of interventions specifically targeting sedentary behaviour reduc- tion, as a sole primary outcome, from randomised control trials in healthy ambula"
+        },
+        {
+          "page": 1,
+          "text": "efficacy of interventions specifically targeting sedentary behaviour reduc- tion, as a sole primary outcome, from randomised control trials in healthy ambulatory adults. This research also sought to identify the successful interventions characteristics, behaviour change techniques (BCT’s) and underlying theories, and their relation to intervention effectiveness. Accepted: August 16, 2021 Published: September 7, 2021 Methods Copyright: © 2021 Curran et al. This is an open access article distributed under the terms of the Creative Commons Attribution License, which permits unrestricted use, distribution, and reproduction in any medium, provided the original author and source are credited. We followed PRISMA reporting guidelines for this systematic review. Six electronic data- bases were searched and a grey literature review conducted. Only randomised or cluster randomised controlled trials, from 2000 to 2020, in adult populations with a sole primary out- come of change in sedentary behaviour were included. Data codebooks were developed, data were extracted, and a narrative synthesis and meta-analysis was conducted using mixed methods random effects models. Data Availability Statement: All relevant"
+        },
+        {
+          "page": 1,
+          "text": "were developed, data were extracted, and a narrative synthesis and meta-analysis was conducted using mixed methods random effects models. Data Availability Statement: All relevant data are within the manuscript and its Supporting information files. Results Funding: University College Dublin (UCD) UCD ADVANCE PhD Scheme is funding this research Grant number R19442 FC is a PhD Candidate and receives a stippend. GO’D is the PhD supervisor Of 5589 studies identified, 7 studies met the inclusion criteria. Six studies reported activ- PAL3 measures of mean daily sitting time, and four reported mean daily standing time, step- ping time and number of sedentary breaks. Pooled analysis of weighted mean differences"
+        },
+        {
+          "page": 2,
+          "text": "who applied for the funding. The funders had no role in study design, data collection and analysis, decision to publish, or preparation of the manuscript. Competing interests: The authors have declared that no competing interests exist. revealed a reduction in mean daily sitting time of -32.4mins CI (-50.3, -14.4), an increase in mean daily standing time of 31.75mins CI (13.7, 49.8), and mean daily stepping time of 9.5mins CI (2.8, 16.3), and an increase in rate of sedentary breaks per day of 3.6 (CI 1.6, 5.6). BCTs used exclusively in two of the three most effective interventions are ‘feedback on behaviour’ and ‘goal setting behaviour’ whilst all three most effective interventions included ‘instruction on how to perform the behaviour’ and ‘adding objects to the environment’, BCTs which were also used in less effective interventions. Conclusions Although limited by small sample sizes and short follow up periods, this review suggests that interventions"
+        },
+        {
+          "page": 2,
+          "text": ", BCTs which were also used in less effective interventions. Conclusions Although limited by small sample sizes and short follow up periods, this review suggests that interventions specifically designed to change sedentary behaviour, reduce overall daily sitting time by half an hour, with an equivalent increase in standing time, in the short to medium term. Effective characteristics and behaviour change strategies are identified for future development of high quality interventions targeting change in sedentary behaviour. Prospero registration PROSPERO 2020 CRD42020172457 Available from: https://www.crd.york.ac.uk/prospero/ display_record.php?ID=CRD42020172457. Introduction Sedentary behaviour (SB), defined as any waking behaviour characterized by an energy expen- diture \u00141.5 metabolic equivalents (METs), while in a sitting, reclining or lying posture [1], has been identified as an independent risk factor for morbidity and mortality [2–5]. A number of recent national and international advisories highlight the"
+        },
+        {
+          "page": 3,
+          "text": "most frequently been focused on workplace interventions with a paucity of cross-domain or non- occupational interventions [23, 25–29]. These factors contribute to the difficulty identify- ing effective sedentary behaviour interventions, and to the inability to translate effective inter- ventions into practice across all domains of living and particularly into community or domestic domains. Of the systematic reviews and meta-analyses synthesising sedentary behaviour interven- tions that have been published over the past decade [30–40], most report interventions which primarily target other behaviours e.g. physical activity or lifestyle [31, 35, 36, 38] and sedentary behaviour is a secondary or combined outcome; focus on, or include children in their analyses [33, 37, 39]; or focus on changes in workplace sitting time [34, 40]. In a review of interventions to reduce sitting time, sixty-three percent of studies focused solely on physical activity, while only twenty-one percent (eight studies) focused solely on sedentary behaviour reduction, and of those, six are workplace"
+        },
+        {
+          "page": 3,
+          "text": "their association with effectiveness. Furthermore, any BCTs identified must be stringently linked to the behaviour change being investigated and interventions must also be underpinned by theory which is explicitly linked to mechanisms of action and BCTs [43, 44]. Whilst one review to date has led the way in process evaluation of sedentary behaviour, it also highlights the need for research focussing solely on sedentary behaviour, for the inclusion of process evaluation, and for data extraction around BCTs to be specifically focussed on sedentary behaviour [36] Hence, identifying the components of successful interventions that focus solely on reducing sedentary behaviour is necessary to inform the development of future interventions, to effect clinically significant change. Effective sedentary behaviour focused interventions will contrib- ute towards the development of clear clinical and public health sedentary reduction guidelines and strategies, and thereby, have the potential to alleviate associated morbidity and mortality. The overarching objective of this review therefore, is to synthesise the highest level evidence for efficacy of interventions that target sedentary behaviour reduction as"
+        },
+        {
+          "page": 4,
+          "text": "theory and techniques; 2) to examine to what extent intervention effectiveness varies across studies depending on their theoretical basis, BCTs, and intervention features. Methods Registration This systematic review is reported in accordance with the Preferred Reporting Items for Sys- tematic Reviews and Meta-Analyses (PRISMA) statement [45]. The review was prospectively registered on April 28, 2020 (PROSPERO 2020: CRD42020172457) with the International Pro- spective Register of Systematic Reviews (PROSPERO). Search strategy Six electronic databases (PubMed, EMBASE, Cochrane Central Register of Controlled Trials (CENTRAL), Cumulative Index to Nursing and Allied Health Literature (CINAHL), Psy- cINFO and SPORTDiscus) were searched. The search strategy was constructed in collabora- tion with a research librarian, around the PICOS tool; (P) Population: sedentary adults, (I) Intervention: any intervention specifically targeting sedentary behaviour as a sole primary out- come, (C) Comparator: usual behaviour,"
+        },
+        {
+          "page": 4,
+          "text": "I) Intervention: any intervention specifically targeting sedentary behaviour as a sole primary out- come, (C) Comparator: usual behaviour, wait-list control, placebo, (O) Outcomes; time spent sedentary and (S) Study type: randomised controlled trials. A complete list of the search terms is available in the additional materials section (S1 Table). In addition to the databases, the ref- erence lists of included articles were hand searched for articles that met the inclusion criteria. Eligibility criteria. Since the study of sedentary time is a relatively new area with a rapid growth in recent years the search was limited to the last 20 years. Randomised controlled trials (RCTs) published in scientific peer reviewed papers, written in English (due to language limi- tations of the research team), between January 2000–December 2020 were included (confer- ence abstracts, reports and theses were excluded). The population, “adult” was defined by the individual study in the range 16–69 years. One study may define"
+        },
+        {
+          "page": 4,
+          "text": "theses were excluded). The population, “adult” was defined by the individual study in the range 16–69 years. One study may define adults as over 18 while another may define it as over 16. Studies including children or adolescents, were excluded. Studies whose target population was older adults (>65 years), or people with a diagnosed pathology (e.g. type 2 diabetes) were excluded. Only interventions specifically designed to change sedentary behaviour were included. Thus, if sedentary time was a combined primary outcome (e.g. sedentary behaviour and physical activity targeted), or a secondary outcome of a study designed primarily to target a different behaviour (e.g. physical activity), it was excluded. Originally, interventions across all domains were included, but recent systematic reviews have focussed on workplace sitting time [35, 46, 47], and workplace interventions may not transfer to community or leisure time. Thus, workplace interventions designed to change workplace sedentary behaviour alone were excluded, but cross domain interventions which included workplace and leisure time or domestic components were"
+        },
+        {
+          "page": 4,
+          "text": "Thus, workplace interventions designed to change workplace sedentary behaviour alone were excluded, but cross domain interventions which included workplace and leisure time or domestic components were included if the objective was to change overall sedentary behaviour. However, all eligible non-workplace interventions were included even if the total day was not addressed, so that sedentary behaviour in this domain can be targeted in future studies. In terms of sedentary behaviour outcome measures, the fol- lowing were acceptable: change in total sedentary time (in sitting or reclining position) and/or change in sedentary bouts (frequency/duration of breaks). Both self-reported or device based (accelerometry and inclinometry) estimates of sedentary behaviour were included. In addition to sedentary behaviour, other outcomes of interest included anthropometry (body weight (BW), BMI, percentage body fat (%BF), waist circumference (WC)), cardiorespiratory fitness as measured by maximal oxygen uptake (V0"
+        },
+        {
+          "page": 5,
+          "text": "cholesterol (HDL), triglycerides (TG), fasting blood glucose (FBG) and glycated haemoglobin (HbA1c)). Data collection and extraction All studies were imported into EndNote (Version X9) and de-duplicated. Two authors (FC, GO’D) independently screened titles and subsequently abstracts for potential inclusion and following review for accuracy, full text was retrieved and independently screened for poten- tially eligible studies. Any disagreement over the eligibility of particular studies was resolved through discussion with a third reviewer (CC) and consensus reached. Microsoft Excel was used to develop comprehensive electronic codebooks by two authors with feedback from a third author, for study characteristics, demographics, primary and sec- ondary outcomes (FC, GO’D, CP), BCTs (FC, JM, GO’D), quality assessment (FC, CC, GO’D) and intervention characteristics were coded according to the template for intervention description and replication (TIDieR) framework [48] (FC"
+        },
+        {
+          "page": 5,
+          "text": "directed in the BCT taxonomy, BCTs were coded only if clearly linked to the target behaviour change (i.e. sedentary behaviour). Data synthesis and quality assessment. Firstly, the included trials are qualitatively described. The narrative synthesis is structured around the characteristics of the studies, including populations, primary and secondary outcomes, the theory, characteristics, and appli- cation of the interventions using the TIDieR framework [48] as an extension of Item five of the CONSORT statement [49]. Behaviour change techniques are identified according to the BCT taxonomy V1, synthesised and discussed in relation to the effectiveness of the interventions. Finally a quality assessment of the included studies, using the Cochrane risk of bias assessment tool is reported [50]. Data analysis strategy Quantitative analysis was conducted in Stata (version 15). Continuous outcome measures were expressed as mean or rate with SD and then converted to standard units (standardised mean difference (SMD)). If the standard deviation (SD) difference was missing, it was calcu- ffiffiffiffiffiff"
+        },
+        {
+          "page": 5,
+          "text": "mean difference (SMD)). If the standard deviation (SD) difference was missing, it was calcu- ffiffiffiffiffiffiffiffiffiffiffiffiffiffi s12 lated using the SD formula of the difference between two means: 2q . Due to the hetero- n2 n1 þ s22 geneity of the interventions and the low number of studies, it was not possible to pool studies according to intervention type. Instead, studies were pooled according to comparable outcome measure. Pooled effects were estimated for daily sitting time, standing time, stepping time and number of sedentary breaks per day. Pooled effects were based on intervention effects (mean between-groups difference) for the end-of-intervention final follow-up endpoint and esti- mated from random effects pairwise meta-analysis using Der Simonian and Laird Model, with the I2 statistic quantifying heterogeneity. Significance was set at p<0.05 (two tailed). Findings from the meta-analysis are presented using forest plots"
+        },
+        {
+          "page": 6,
+          "text": "meta-analysis, and was therefore not included. Planned a priori subgroup analyses for BMI categories and domains of living was not possible due to lack of data and exclusion of work- place interventions. Results Literature selection A total of 5589 studies were initially identified. Following review by title and abstract, 45 stud- ies progressed to full manuscript review. Of these, 38 were excluded as they did not fulfil our inclusion criteria. Details of full text exclusions are available in the additional materials section (S2 Table). The remaining 7 studies were included in this review. The detailed process is illus- trated in Fig 1. Fig 1. PRISMA flow diagram. https://doi.org/10.1371/journal.pone.0256828.g001"
+        },
+        {
+          "page": 7,
+          "text": "73.1) Nishimuru 2019 26 Japan Age 30–69 years; pilot 2 arm parallel self report SB time >8hrs/d immediate vibrotactile feedback via activPAL; instruction to stand for at least 1 mins LT = leisure time; SB = sedentary behaviour; PA = Physical Activity https://doi.org/10.1371/journal.pone.0256828.t001 Study characteristics The characteristics of the included studies are presented in Table 1. Only three studies pub- lished a CONSORT [49] flow diagram [51–53], two of which also published a CONSORT checklist and one study reported that it based its intervention design on the guidelines."
+        },
+        {
+          "page": 8,
+          "text": "involved in the studies. Mean BMI was 29.2 (SD 4.7) across the 6 studies in which it was reported (n = 475), [51– 53, 55–57]. Three studies reported a healthy mean BMI (<25) (n = 107) [55–57], while one reported mean BMI as overweight (27.5kg/m2) [52]. Two studies [51, 53], specifically targeted populations with overweight or obesity, thus of the total population, 69.9% (n = 387) were liv- ing with either overweight or obesity (BMI > 25). Overall employment across the seven studies was 61.7% (n = 329), but one study targeted housewives with no paid employment [51] and another targeted full-time students [57], while two studies targeted employees [51, 54]. Intervention duration was extremely varied, ranging from one week in three of the studies [51, 52, 56] to fifty-two weeks [53]"
+        },
+        {
+          "page": 8,
+          "text": "Intervention duration was extremely varied, ranging from one week in three of the studies [51, 52, 56] to fifty-two weeks [53]. The remaining three study interventions lasted five [57], eight [55], and twenty-six [52] weeks respectively. Study duration and final follow-up also ran- ged from two to fifty-two weeks. Measurement of sedentary behaviour All seven studies used device based measures of sedentary behaviour although the measures reported were not standardised across the studies. Table 2 provides details. One study used the UP24 Jawbone accelerometer, [56] while the activPAL accelerometer was used by all six others [51–55, 57] and four reported using daily logs to verify the data [51–54]. An ACTigraph GX3 accelerometer was also used in three studies [51, 53, 57] but the outcomes reported varied across these studies. Self-reported measures of sedentary behaviour were also used in three studies, physical activity scale (PAS"
+        },
+        {
+          "page": 8,
+          "text": "but the outcomes reported varied across these studies. Self-reported measures of sedentary behaviour were also used in three studies, physical activity scale (PAS) [52], international physical activity questionnaire (IPAQ) [53, 57], sedentary behaviour questionnaire (SBQ) [57]. In terms of device based sedentary behaviour variables recorded, total daily sitting time was measured in five studies, [51–54, 57] while one study limited the measurement to nine hours per day to ‘limit skin irritation’ [55] and another reported only the longest sitting bout [56]. The number of prolonged sitting bouts (>30 mins) was reported in two studies [51, 54] while the total duration of prolonged sitting bouts was reported in 3 studies [54, 56, 57]. Four studies reported the number of breaks in sitting [53, 54, 56, 57], while standing and stepping time was reported in four studies [52, 54, 55, 57]. Wear time protocols for activPAL were heterogeneous,"
+        },
+        {
+          "page": 9,
+          "text": ".40 3.70 0.20 7.10 < .05 47.30 11.10 53.90 11.00 54.60 14.90 55.40 16.30 5.70 1.00 10.40 < .05 Mean day) 9.30 1.80 9.00 1.70 -0.27 1.70 9.80 1.80 9.90 1.80 0.06 1.70 -0.32 -0.87 0.24 0.260 0.310 Standing time (hrs/day) 4.20 1.10 4.40 1.30 0.21 1.00 4.10 1.20 9.10 1.80 -0.22 1.10 0.44 0.80 0.80 0.020 0.020 Stepping time (hrs/day) 1.80 0.60 1.90 0.60 0.10 0.50 1.70 0.70 1.70 0.70 -0.04 0.60 0.15 -0."
+        },
+        {
+          "page": 11,
+          "text": "value (Continued) 95% CI P-value adjusted p 95% CI Upper difference Lower CI Mean in Mean SD or CI Change post SD or CI Mean pre SD or CI Mean in Mean SD or CI Change 56.90 9.06 53.6 11.00 3.28 7.84 0.22 19.10 6.67 3.00 2.71 16.10 6.95 <0.001 post SD or Intervention Group Control Group Intervention Vs Control CI Mean Pre SD or Mean Total Standing time (hrs/day) 5.16 1.82 4.39 1.40 0.77 0.99 0.04 Stepping time (hrs/day) 2.33 0.37 1.24 0.29 1.09 0.41 <0.001 Sit to Stand transitions (n/ day) Step count (n/ day) 12076 1934 5712 1335 6363 1953 <0.001 VPA (mins/day) 9.7 33.5 16.7 33.5 41.9 9.5 32"
+        },
+        {
+          "page": 12,
+          "text": "345 76 17.5 (-32.4,- Sit to Stand transitions (n/ 9hr) Sit bouts > 30 mins (n/9hr) 142.00 84.00 121.00 69.00 -20.5 (-42.4, Standing time (mins/9hr) 137.00 55.00 144.00 53.00 7.50 (-5.3, Stepping time (mins/9hr) 51.00 11.00 55.00 10.00 3.90 (-3.6, activPAL Sedentary time Accelerometer (UP24-Jawbone) longest bout Kitigawa 2020 Nishimuru 2019 (SBQ); Light Physical Activity (LPA); Moderate Physical Activity (MPA); Vigorous Physical Activity (VPA) Table 2. (Continued) Reference (Outcome Measurement) Abbreviations; standard deviation (SD); Confidence Interval (CI); hours (hrs); Number (n); Physical Activity Scale (PAS); Physical Activity ("
+        },
+        {
+          "page": 13,
+          "text": "triglycerides. Only one study reported follow up of anthropometry or clinical measures, all not significantly different [53]. (S3 Table). Secondary psychosocial measures were included in only two studies, the EuroQol 5 dimen- sion visual analogue scale (EQ-5D VAS) and hospital anxiety and depression scale (HADS) [53], profile of mood states (POMS) [57]. Effects of interventions Six studies reported activPAL measures of mean daily sitting time [51–55, 57], and four reported mean daily standing time, stepping time [51, 52, 54, 55], and number of sedentary breaks [51, 53–55]. Random effects analysis was performed to calculate weighted mean differ- ences for these outcomes. Pooled analysis revealed a reduction in mean daily sitting time of -32.4mins 95% confidence interval CI (-50.3, -14.4), an increase in mean daily standing time of 31.75mins CI (13."
+        },
+        {
+          "page": 13,
+          "text": "interval CI (-50.3, -14.4), an increase in mean daily standing time of 31.75mins CI (13.7, 49.8), and mean daily stepping time of 9.5mins CI (2.8, 16.3), and an increased rate of sedentary breaks per day of 3.6 CI (1.6, 5.6). Figs 2–5 illustrate the results. Core components of the interventions Interventions: Description and replicability. The TIDieR twelve item checklist [48] was used to score the description and replicability of the intervention and control conditions, with each point scored only if explicitly reported (max score 12). The mean score was 8.1 (SD 1.8) for interventions and 2.7 (SD 1.4) for the control condition (Table 3). All studies reported Fig 2. activPAL mean daily sitting time (minutes). Heterogeneity chi-squared = 10.43 (d.f. = 5) p = 0."
+        },
+        {
+          "page": 13,
+          "text": "sitting time (minutes). Heterogeneity chi-squared = 10.43 (d.f. = 5) p = 0.064; I-squared (variation in Weighted Mean Difference (WMD) attributable to heterogeneity) = 52.0%; Test of WMD = 0: z = 3.54 p = 0.000. https://doi.org/10.1371/journal.pone.0256828.g002"
+        },
+        {
+          "page": 16,
+          "text": "Fig 5. activPAL mean daily rate of sedentary breaks. Heterogeneity chi-squared = 2.04 (d.f. = 3) p = 0.565; I-squared (variation in WMD attributable to heterogeneity) = 0.0%; Test of WMD = 0: z = 3.55 p = 0.000. https://doi.org/10.1371/journal.pone.0256828.g005 There was limited use of theory to inform the interventions, specifically only three studies reported any behaviour change theory as identified by the TIDieR analysis [52, 53, 57]. Those theories were habit theory of behaviour change [57], behaviour choice theory [53], common sense model dual process theory [53] and social cognitive theory [53]. However, evidence for application of the theories was lacking, with no explicit or hypothesised links to BCTs or inter- vention processes reported. Effectiveness of intervention components, behavioural theory and"
+        },
+        {
+          "page": 16,
+          "text": "was lacking, with no explicit or hypothesised links to BCTs or inter- vention processes reported. Effectiveness of intervention components, behavioural theory and BCTs. Due to het- erogeneity in content and small number of studies, statistical analysis of effectiveness relative to intervention components, BCTs or theory was not possible. Study length was very short (2 weeks) in two of the most effective interventions [51, 54] but considerably longer in the third most effective intervention (26 weeks) [52]. Whilst the longest study [53], reported the least comparative difference between intervention and control groups at follow up (52 weeks), than any of the other studies included in the review. This study which was also the largest study and therefore had the greatest weight in the effects analysis, reported that the mean daily sitting time was reduced in both the intervention (-38.4 mins) and control (-34.8 mins) groups. Despite its robust methodology and design, the study had an attrition rate of almost thirty- three percent, and an integral part of"
+        },
+        {
+          "page": 16,
+          "text": ") groups. Despite its robust methodology and design, the study had an attrition rate of almost thirty- three percent, and an integral part of the intervention (three-hour education workshop) was very poorly attended. Furthermore, the control group received a pamphlet which contained some of the key educational components delivered in the intervention group workshop, and this may account for attenuating sedentary behaviour within the control group. The true"
+        },
+        {
+          "page": 19,
+          "text": "828.t005 issuing the activPAL device, to both control and intervention groups for ‘postural assessment’, essentially acting as placebo for the control group, whilst only the intervention group received vibrotactile feedback from the device. Four further studies had a moderate risk of selection bias with evidence of random sequence generation but not allocation concealment [51, 52, 56, 57] and two studies had evidence of neither and were deemed high risk of selection bias [53, 54]. Risk of performance bias (participant and personnel blinding) was determined to be high for all of the included studies except one [56] which reported blinding of personnel and there- fore risk was assessed as moderate. Only one study reported blinding of participants but this was assessed moderate risk due to the nature of the intervention being apparent to participants [55]. All six other studies reported that it was not possible to blind the participants. Two stud- ies report that study personnel were aware of the allocation [52, 57] and four did not report personnel blinding [51, 53–55]"
+        },
+        {
+          "page": 19,
+          "text": "five other studies were assessed as low risk for reporting bias with all primary outcome measures reported [52–56]. Three studies were identified as high risk for other sources of bias, due to no reported sample size calculation [54], sample size based on a clinical trial measuring a different outcome [55] and no crossover washout and very small sample size [51]. Four studies were considered low risk for other bias, reporting sample size calculations, ethical approval, funding sources and sensitivity analysis [52, 53, 56, 57]. Overall risk of bias was determined to be low for only one study [56], while four studies were assessed as moderate risk of overall bias [52, 53, 55, 57] and two studies were assessed as high risk of bias [51, 54]. A summary of the risk of bias across the included studies is shown in Fig 6."
+        }
+      ],
+      "queries": [
+        {
+          "category": "factual_lookup",
+          "question": "What was the PROSPERO registration ID of this review?",
+          "labels": [
+            {
+              "chunk": 4,
+              "quote": "PROSPERO 2020 CRD42020172457"
+            },
+            {
+              "chunk": 7,
+              "quote": "PROSPERO 2020: CRD42020172457"
+            }
+          ]
+        },
+        {
+          "category": "methodology",
+          "question": "Why did the authors pool studies by outcome instead of intervention type?",
+          "labels": [
+            {
+              "chunk": 13,
+              "quote": "it was not possible to pool studies according to intervention type. Instead, studies were pooled according to comparable outcome measure"
+            }
+          ]
+        },
+        {
+          "category": "numerical",
+          "question": "How many studies remained after full-text eligibility review?",
+          "labels": [
+            {
+              "chunk": 14,
+              "quote": "The remaining 7 studies were included in this review"
+            }
+          ]
+        },
+        {
+          "category": "conflicting",
+          "question": "Compare the pooled change in sitting time with the comparatively small intervention–control difference in the longest study.",
+          "labels": [
+            {
+              "chunk": 3,
+              "quote": "reduction in mean daily sitting time of -32.4mins"
+            },
+            {
+              "chunk": 22,
+              "quote": "reduction in mean daily sitting time of -32.4mins"
+            },
+            {
+              "chunk": 26,
+              "quote": "intervention (-38.4 mins) and control (-34.8 mins) groups"
+            }
+          ]
+        },
+        {
+          "category": "evidence_gap",
+          "question": "What prevented the prespecified subgroup analyses for BMI and domains of living?",
+          "labels": [
+            {
+              "chunk": 14,
+              "quote": "subgroup analyses for BMI categories and domains of living was not possible due to lack of data and exclusion of work- place interventions"
+            }
+          ]
+        },
+        {
+          "category": "absent",
+          "question": "What orbital eccentricity does the review estimate for a compact binary merger?",
+          "labels": [],
+          "absence_reason": "The complete paper addresses a different population and phenomenon and contains no observations of this kind."
+        }
+      ]
+    }
+  }
+}

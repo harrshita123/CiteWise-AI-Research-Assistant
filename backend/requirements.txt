@@ -12,3 +12,4 @@ chromadb>=1.5,<2
 python-multipart>=0.0.20,<1
 tokenizers>=0.20,<1
 cloudinary>=1.46,<2
+jsonschema>=4.26,<5

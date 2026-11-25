@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
@@ -11,6 +12,13 @@ from bson.errors import InvalidId
 class UserRepository:
     def __init__(self, collection: AsyncCollection[dict[str, Any]]):
         self.collection = collection
+
+    async def create_demo_guest(self) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        user = {"email": f"{uuid4().hex}@demo.invalid", "name": "Demo guest", "role": "user",
+                "created_at": now, "updated_at": now}
+        result = await self.collection.insert_one(user)
+        return {**user, "_id": result.inserted_id}
 
     async def ensure_indexes(self) -> None:
         indexes = await self.collection.index_information()

@@ -9,12 +9,13 @@ import { clampSidebarWidth, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, resizedSidebar
 import ThemeToggle from "./ThemeToggle";
 
 export type ConversationState = {
+  demoMode: boolean;
   conversations: Conversation[];
   setConversations: Dispatch<SetStateAction<Conversation[]>>;
   refreshConversations: () => Promise<void>;
 };
 
-export default function WorkspaceLayout({ user }: { user: SignedInUser }) {
+export default function WorkspaceLayout({ user, demoMode }: { user: SignedInUser; demoMode: boolean }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [logoutError, setLogoutError] = useState("");
@@ -170,7 +171,6 @@ export default function WorkspaceLayout({ user }: { user: SignedInUser }) {
           <NavLink to="/papers" title="Library" aria-label="Library" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="library" /><span className="workspace-nav-label">Library</span></NavLink>
           <NavLink to="/research" title="Research" aria-label="Research" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="search" /><span className="workspace-nav-label">Research</span></NavLink>
           {user.role === "admin" && <NavLink to="/admin" title="Admin" aria-label="Admin" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="user" /><span className="workspace-nav-label">Admin</span></NavLink>}
-          {user.role === "admin" && <NavLink to="/admin/evaluation" title="Retrieval evaluation" aria-label="Retrieval evaluation" className={({ isActive }) => isActive ? "active" : ""}><WorkspaceIcon name="shield" /><span className="workspace-nav-label">Retrieval evaluation</span></NavLink>}
         </nav>
         <div className="workspace-conversation-navigation">
           <ConversationNavigation conversations={conversations} setConversations={updateConversations} papers={papers}
@@ -200,7 +200,10 @@ export default function WorkspaceLayout({ user }: { user: SignedInUser }) {
           event.preventDefault();
         }} />}
       <div className="workspace-page">
-        <Outlet context={{ conversations, setConversations: updateConversations, refreshConversations } satisfies ConversationState} />
+        {demoMode && <div className="citewise-demo-banner" role="note">
+          <strong>Demo Mode</strong> · Sample AI responses
+        </div>}
+        <Outlet context={{ conversations, setConversations: updateConversations, refreshConversations, demoMode } satisfies ConversationState} />
       </div>
     </div>
   );

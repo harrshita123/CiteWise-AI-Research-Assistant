@@ -18,3 +18,14 @@
 .role-badge { display: inline-block; padding: 5px 9px; border-radius: 5px; font-size: .78rem; font-weight: 800; text-transform: capitalize; }
 .role-badge.admin { color: #293bb2; background: #eef1ff; }
 .role-badge.user { color: #146967; background: #e8f7f5; }
+.answer-quality { margin-top: 40px; }
+.answer-quality-filters, .answer-quality-summary { display: flex; flex-wrap: wrap; gap: 12px; }
+.answer-quality-filters label { display: grid; gap: 5px; font-size: .9rem; }
+.answer-quality-filters select, .answer-quality-filters input { min-height: 36px; max-width: 240px; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+.answer-quality-summary > div { flex: 1 1 150px; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.answer-quality-summary dd { margin: 4px 0 0; }
+.answer-quality-summary dd:first-of-type { font-size: 1.2rem; font-weight: 700; }
+.answer-quality-summary dd:last-of-type { color: var(--muted); font-size: .85rem; }
+.answer-quality-detail { margin-top: 18px; border: 1px solid var(--line); border-radius: 8px; padding: 16px; overflow-wrap: anywhere; }
+.answer-quality-detail details p { white-space: pre-wrap; }
+.answer-quality-detail li + li { margin-top: 6px; }

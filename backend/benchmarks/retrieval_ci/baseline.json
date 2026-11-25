@@ -1,0 +1,26 @@
+{
+  "fixture_sha256": "aed6d8c9185eca39d7d42372cfdea08f528ecddcfccfe73231cd3faa1a6abe70",
+  "k": 5,
+  "dependencies": {
+    "chromadb": "1.5.9",
+    "numpy": "2.5.3",
+    "onnxruntime": "1.30.0",
+    "tokenizers": "0.23.2"
+  },
+  "papers": {
+    "urban-heat": {
+      "queries": 5,
+      "hits": 7,
+      "recall_sum": "5",
+      "all_required": 5,
+      "reciprocal_rank_sum": "5"
+    },
+    "cross-lingual": {
+      "queries": 5,
+      "hits": 5,
+      "recall_sum": "9/2",
+      "all_required": 4,
+      "reciprocal_rank_sum": "37/10"
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "fixture_sha256": "fdc2c066162b54762b82df84a3bde6fa8a25de7252ae21fcc42a2cf7c5ca2147",
+  "k": 5,
+  "dependencies": {
+    "chromadb": "1.5.9",
+    "numpy": "2.5.3",
+    "onnxruntime": "1.30.0",
+    "tokenizers": "0.23.2"
+  },
+  "papers": {
+    "gravitational-wave": {
+      "queries": 5,
+      "hits": 6,
+      "recall_sum": "5/2",
+      "reciprocal_rank_sum": "5/2",
+      "all_required": 2
+    },
+    "sedentary-review": {
+      "queries": 5,
+      "hits": 6,
+      "recall_sum": "11/3",
+      "reciprocal_rank_sum": "4",
+      "all_required": 3
+    }
+  }
+}

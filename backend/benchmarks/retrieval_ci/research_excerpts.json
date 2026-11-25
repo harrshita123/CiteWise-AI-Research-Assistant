@@ -1,0 +1,302 @@
+{
+  "papers": {
+    "urban-heat": {
+      "title": "The influence of city size versus urban form on land surface temperature variation and the surface urban heat island effect: A cross-city analysis of German cities",
+      "authors": "Regan Doyle, Tobias Leichtle, Stephan Pauleit, Hannes Taubenböck",
+      "source": "https://doi.org/10.1371/journal.pone.0340060",
+      "license": "CC BY 4.0",
+      "pdf_sha256": "69e2de107fa712603ec98d838aae730c4f19cffde05110ffec4448847c234ab0",
+      "chunks": [
+        {
+          "page": 4,
+          "text": "urbanization levels is a novel approach; however, it is assumed that urban form will help identify potential patterns in the SUHI effect within German cities. 2. Materials and methods The research utilizes statistical and GIS analysis based on remote sensing data and consists of an intra-urban SUHI anal­ ysis using urbanization level-data, followed by a comparative analysis using land cover data. We assume that an intra-urban SUHI effect can be found in all cities; however, the analysis will determine its differ­ ences between cities based on urbanization levels. To do so, the statistical relationships between average mean and maximum LST and urbanization levels are analyzed to identify any potential patterns of the SUHI effect. Furthermore, we investigate whether city size may influence SUHI measures using population groupings. The use of land cover data allows for comparison of the urban form of each city to potentially explain spatial patterns of the SUHI effect. To do so, the study uses specific indicators of urban form based on landscape metrics. The cities are then clustered based on these indicators and the results are compared to"
+        },
+        {
+          "page": 4,
+          "text": ", the study uses specific indicators of urban form based on landscape metrics. The cities are then clustered based on these indicators and the results are compared to mean and maximum LST measures. This research is novel in two key aspects: first, such a comparative study including medium- and small-sized cities has not been previously carried out in Germany. Second, the novel urbanization data allows the research to overcome articifcal boundaries of administrative units for a structurally consistent examination of the intra-urban SUHI phenomenon. 2.1. Study area To carry out the analysis, the 15 largest cities in Germany have been chosen for analysis. In addition, all Bavarian urban districts, or Kreisfreie Staedte, are included in the study to add smaller towns and cities to the sample. As such, an anal­ ysis of the largest urban areas of Germany combined with medium and smaller sized cities – according to the BBR [27] urban classifications – can provide important insight into the variables that impact LST variation within cities of various population classes. Thisis crucial for urban planners"
+        },
+        {
+          "page": 4,
+          "text": "27] urban classifications – can provide important insight into the variables that impact LST variation within cities of various population classes. Thisis crucial for urban planners given the large percentage of the German population living in medium-small sized cities. Therefore, a total of 38 cities are included in the analysis, as illustrated in Fig 1 below. Bavaria was chosen for the analysis, not only because it is the largest state in Germany, but also because the rural nature of the state provides a large number of medium-small sized cities for analysis and meets the research require­ ments regarding variation in urbanization as well as land cover typologies. The selection allows the study to examine not only the largest cities in Germany, but also medium-small cities of the largest federal state; thereby, achieving a high variability of city types. For the comparative analysis, the cities are divided into population groupings based on German ‘City and Municipality Types’ as defined by the German Federal Institute for Construction and Regional Planning (BBR) [27]. The population groupings used within the analysis, as well as their corresponding"
+        },
+        {
+          "page": 4,
+          "text": "German Federal Institute for Construction and Regional Planning (BBR) [27]. The population groupings used within the analysis, as well as their corresponding populations are listed in Table 1. 2.2. Data collection The various datasets were spatially harmonized using a 1-hectare (ha) INSPIRE grid database [28]. This grid provides the basis for uniform transformation of all input data to reduce noise and improve model robustness in subsequent analyses. The following data is included: • Land Surface Temperature (LST): LST was obtained from Landsat 8 and 9 Operational Land Imager (OLI) and Thermal Infrared Sensor (TIRS) images with a spatial resolution of 30 meters from the years 2013–2023. Landsat data cap­ tures the Earth’s surface in a 16-day repeat cycle with a swath coverage of 185 x 185 km [29]. The last ten years were included to compensate data inconsistencies due to differing acquisition dates of neighboring orbits as well as additional data gaps due to cloud cover, thereby providing an accurate average for analysis"
+        },
+        {
+          "page": 4,
+          "text": "inconsistencies due to differing acquisition dates of neighboring orbits as well as additional data gaps due to cloud cover, thereby providing an accurate average for analysis. A total of 10,822 Landsat satellite images were collected and processed. Statistical aggregates were computed to determine the average mean and maxi­ mum LST for all 38 cities in the analysis covering the years 2013–2023 (see Figs 2a and 2b for an example)."
+        },
+        {
+          "page": 5,
+          "text": "Fig 1. Selected German Cities – the 15 largest cities of Germany as well as all urban districts of Bavaria. Citation: Map data is available at USGS National Map Viewer (public domain): http://viewer.nationalmap.gov/viewer/. https://doi.org/10.1371/journal.pone.0340060.g001 Table 1. City population groupings. Population Grouping (DE) Population Grouping (ENG) Population Grossstadt 1 (GS1) Large city 1 (GS1) > 500,000 Grossstadt 2 (GS2) Large city 2 (GS2) 100,000–499,999 Mittelstadt 1 (MS1) Medium-sized city 1 (MS1) 50,000–99,999 Mittelstadt 2 (MS2) Medium-sized city 2 (MS2) < 50,000 https://doi.org/10.1371/journal.pone.0340060.t001 • Urbanization Levels: The urbanization levels used in the"
+        },
+        {
+          "page": 5,
+          "text": "/10.1371/journal.pone.0340060.t001 • Urbanization Levels: The urbanization levels used in the analysis are based on a study by Taubenböck et al. [19]. As the study assumes the ‘urban is a form of higher density’ [19, p. 3], areas of increased urbanization consist of increased density of population and built space; therefore, the levels were calculated based on the parameters of building density, population density, and building typology determined at a spatially continuous and consistent grid of 1 hectare. A probability-based approach was then applied to combine the different parameters and five urbanization level thresholds"
+        },
+        {
+          "page": 6,
+          "text": "Fig 2. Examples of data used in the research (Munich). Citation: LST data is available at Landsat: http://landsat.visibleearth.nasa.gov/. All data was prepared by DLR. https://doi.org/10.1371/journal.pone.0340060.g002 are produced, which include: High Density (HD), Medium-High Density (MHD), Medium Density (MD), Medium-Low Density (MLD), and Low Density (LD) (see Fig 2c). • Land Cover: Land cover data is taken from the study of Weigand et al. [30]. The data features high spatial resolution of 10 meters as well as area-wide coverage of the entire country of Germany. The data was created using images col­ lected from Sentinel-2 satellite data and includes seven thematic land cover classes: artificial land or built-up land (AL), open soil (OS), high seasonal vegetation (HSV) and high perennial vegetation"
+        },
+        {
+          "page": 7,
+          "text": "To determine the extent of the SUHI effect and investigate patterns that influence the SUHI effect within German cities, a statistical comparative analysis of LST data based on urbanization levels has been carried out. For the comparative analysis of cities, the established administrative boundaries of the selected cities are utilized as the most practical way to define and assign raster cells and subsequent data to each city; however,the LST data is summarized in terms of mean and standard deviation (SD) by the particular urbanization level. To further assess the difference in LST value between cit­ ies of various population groupings, the average effect of the urbanization level, i.e., the difference between HD and other urbanization type (x), on the surface temperature is evaluated as ∆LST(x) = LSTHD – LSTx where LSTx is the average Landsat LST of all grid cells of urbanization level x per city. Positive values indicate a higher temperature in the HD area with differences increasing as areas become less dense. For x = LD, ∆LST("
+        },
+        {
+          "page": 11,
+          "text": "Fig 5. Average differences (median upper and lower quartile) in LST (∆LST) between High Density (HD) and other urbanization levels (LD, MLD, MD, MHD) respectively. (a) GS 1 mean LST; (b) GS 1 max LST; (c) GS 2 mean LST; (d) GS 2 max LST; (e) MS 1 mean LST; (f) MS 1 max LST; (g) MS 2 mean LST; (h) MS 2 max LST. https://doi.org/10.1371/journal.pone.0340060.g005"
+        },
+        {
+          "page": 12,
+          "text": "Table 5. Population groupings and proportionate % cover by urbanization level. Pop Class % HD % MHD % MD % MLD % LD GS 1 9.13 8.36 23.73 18.41 40.37 GS 2 5.96 7.34 20.65 16.88 49.17 MS 1 3.76 5.35 18.08 15.20 57.61 MS 2 1.71 3.01 13.25 16.53 65.51 https://doi.org/10.1371/journal.pone.0340060.t005 Table 6. Correlation values of urban form indicators. TSA ED MPS NP CILP AWMSI CI MEAN LST MAX LST TSA 1 0.029 0.069 0.920*** −0.779*** 0.966*** −0.469** −0.017 −0.214 ED 1 −0.838*** 0.239 0.016 0.037"
+        },
+        {
+          "page": 15,
+          "text": "4. Discussion 4.1. Extent of the SUHI effect and the influence of city size in Germany As was originally hypothesized, the intra-urban SUHI phenomenon can be observed in every city within the study. The cit­ ies have a significant difference in temperature between HD and LD defined areas with LST values increasing as density increases. Therefore, the hypothesis regarding the existance of the SUHI effect as well as positive correlation between higher LST values and increase in density within the selected cities can be confirmed. For most cities in the study, the temperature difference between the densest and least dense spaces is around 5-6°C for the yearly average (mean LST) and more than 7°C for the highest average (maximum LST) temperature. This corresponds with existing literature [1,18,21] in that increased density and impervious land coverage associated with urbanization increase the SUHI effect. While this is not a novel finding, the approach offers a potential new methodology to measure the SUHI effect based on levels of density within a city"
+        },
+        {
+          "page": 15,
+          "text": "cities (GS 1) would exhibit the larg­ est SUHI effect, having higher average mean and maximum LST values than cities of smaller population groupings (GS 2, MS 1, MS 2) due to larger accumulations of impervious surfaces; however, this hypothesis must be declined in the context of the study. Larger German cities have a lower average mean and maximum LST across all urbanization levels than cities in the smaller population groupings. This is in stark contrast to findings of existing literature, which commonly found a positive correlation between the expansion and growth of cities and increased SUHI effects [5–7,21,22,26]. One possible explanation is that German cities are relatively small compared with cities in other parts of the world, such as Asia and the Americas – a common focus of many existing studies. The largest German cities would be considered medium-small according to the UN definition [8]. Further research including additional German cities and other European countries may provide additional insights. Another possible explanation is that German cities have developed in a signifi­ cantly different manner"
+        },
+        {
+          "page": 15,
+          "text": "also found that the internal structures of cities in combination with urban size likely influence the SUHI effect, and therefore, SUHI is relative. There is research that proposes densification of urban spaces to reduce GHG emissions associated with travel and to protect existing natural landscapes [38]. On the other hand, such urban planning can significantly increase the SUHI effect, increasing exposure to heat stress. Further in-depth analysis of the SUHI effect on a city level may provide more detailed information, such as specific areas for urban planners to focus their efforts. In-depth analysis would also assist in identifying more specific potential heat sources and sinks within German cities to aid urban planners in developing miti­ gation strategies. While a large-scale analysis such as in this study does provide evidence that the SUHI effect is visible within all German cities, it may be the case that vulnerability to heat is not equal for all city residents with risk being higher"
+        },
+        {
+          "page": 16,
+          "text": "clusters do not identify significant variation in LST, they have confirmed that certain characteristics of urban form can be positively identified that are associated with higher average LST values, specifically the compact and circular nature of urban centers with high connectivity. These findings are similar to those in a study of European cities using geographically weighted regression analyses by Mashhodi and Unceta [40], which found that almost 70% of LST inequality could be explained by urban form, particularly impervious surfaces, den­ sity, compactness, and vegetation. The clustering method has proven useful in characterization of the urban form, which was not possible in the analysis of the urbanization levels. The combination of both methods has provided insight into the extent of the intra-urban SUHI effect, and how urban form may influence the SUHI effect during heat wave events. Urban form differs significantly even within national borders likely due to planning regimes and historical development, as well as terrain and natural features such as rivers or mountain ranges; however, we can see some commonalities based on city size, which is consistent with"
+        },
+        {
+          "page": 16,
+          "text": "as terrain and natural features such as rivers or mountain ranges; however, we can see some commonalities based on city size, which is consistent with previous studies that found a significant influence of urban size on urban form development [41]. Similar to findings by Liu et al. [22], this study has found that very large German cities tend to have a more complex urban shape with less evenly dispersed built areas and larger clusters of impervious surface, identified as cluster 5 in the k-means cluster analysis. This urban form is likely associated with increasing irregularity of impervious patch shape as the city expands. While it was initially hypothesized that the higher overall amount of impervious surface would result in higher average LST values, the findings indicate that patch dispersal and irregular shape associated with the historical development has exerted a cooling effect on the urban environment, as cluster 5 cities were found to have the lowest average maximum LST values based on the city total average. These findings are consistent with a study of Chinese cities by Yue et al. [23], which"
+        },
+        {
+          "page": 16,
+          "text": ", with few surrounding areas classified as impervious. Previous studies [22,26] found similar results, in that LST is positively correlated with urban form factors such as compactness, complexity and shape. As suggested by these existing studies [22,26], this urban form likely prevents ventilation, as warm air is trapped within urban areas and cool air from surrounding environments is unable to circulate. Upon closer examination of the structure of each city, we find highly compact urban centers, with little vegetation between these spaces. Additionally, a large portion of the vegetation immediately surrounding the impervious surface is classified as low seasonal or low perennial vegeta­ tion. Areas of decreased vegetation cover, such as open or agricultural land have been found to correspond with higher temperatures, particularly during the daytime [25]. These surrounding vegetative types likely do not offer relief during heat stress events and may help explain higher maximum LST values. Cities classified as cluster 3, while larger on average than cities in cluster 2, did share similar characteristics, namely the compact nature of impervious surfaces."
+        },
+        {
+          "page": 16,
+          "text": "classified as cluster 3, while larger on average than cities in cluster 2, did share similar characteristics, namely the compact nature of impervious surfaces. There are"
+        },
+        {
+          "page": 17,
+          "text": "more cases of vegetation scattered between patches; however, this is largely due to the sheer amount of impervious surface. Cluster 3 cities do have a large amount of low vegetation surrounding the built-up areas of the city; however, they also have a large amount of high vegetation, indicating it is the compact nature of the impervious surface that results in higher averagemaximum LST values. It should be noted that cluster 2 does contain the largest number of cities, which may impact the averages but given the higher averages of cluster 3 and the similarities between the city characterizations, we can assume the data to be consistent. Given Germany’s long history, the similar characteristics associated with the urban form found in clusters 2 and 3 as well as the resulting higher average maximum LST values is likely a result of historical development, as many Bavarian cities date back to medieval times, with dense centers made of impervious surfaces such as stone with little vegetation. Many of these cities have not expanded significantly when compared with large cities like Berlin. Based on the findings, the city history and evolution has likely"
+        },
+        {
+          "page": 17,
+          "text": "vegetation. Many of these cities have not expanded significantly when compared with large cities like Berlin. Based on the findings, the city history and evolution has likely impacted the urban form, thereby influencing the LST and therefore must be taken into consideration when compared with newer cities such as those found in Asia or the Americas. It must also be taken into consideration that the background climates and terrain may also impact rural temperatures and consequently the assessment of LST variation [42]. For example, proximity to mountain ranges or other factors associated with varying climate zones may significantly impact the variation in LST, and therefore, requires more detailed future investigation. 4.3. Urban interventions In general, the composition of heat sources and sinks is an essential factor influencing the thermal environment, as the SUHI effect is not equal across cities and it is difficult to remove or significantly change the existing urban form; therefore, the spatial structure of a city requires in-depth analysis for future mitigation planning to better focus on specific areas of a city. Based on the analysis, the findings regarding the impact of urban form on the SUHI"
+        }
+      ],
+      "queries": [
+        {
+          "category": "factual_lookup",
+          "question": "How many German cities were included in the analysis?",
+          "labels": [
+            {
+              "chunk": 2,
+              "quote": "a total of 38 cities are included in the analysis"
+            },
+            {
+              "chunk": 4,
+              "quote": "for all 38 cities in the analysis"
+            }
+          ]
+        },
+        {
+          "category": "methodology",
+          "question": "What common spatial grid was used to harmonize the input datasets?",
+          "labels": [
+            {
+              "chunk": 3,
+              "quote": "using a 1-hectare (ha) INSPIRE grid database"
+            }
+          ]
+        },
+        {
+          "category": "numerical",
+          "question": "How many Landsat satellite images did the researchers process?",
+          "labels": [
+            {
+              "chunk": 4,
+              "quote": "A total of 10,822 Landsat satellite images were collected and processed"
+            }
+          ]
+        },
+        {
+          "category": "synthesis",
+          "question": "What was the expected effect of city size on surface temperatures, and what did the German city comparison actually find?",
+          "labels": [
+            {
+              "chunk": 12,
+              "quote": "would exhibit the larg­ est SUHI effect"
+            },
+            {
+              "chunk": 12,
+              "quote": "Larger German cities have a lower average mean and maximum LST"
+            }
+          ]
+        },
+        {
+          "category": "synthesis",
+          "question": "How did surface temperature vary with urban density, and did larger cities have higher mean temperatures than smaller cities?",
+          "labels": [
+            {
+              "chunk": 11,
+              "quote": "LST values increasing as density increases"
+            },
+            {
+              "chunk": 12,
+              "quote": "Larger German cities have a lower average mean and maximum LST"
+            }
+          ]
+        }
+      ]
+    },
+    "cross-lingual": {
+      "title": "Multi-Target Cross-Lingual Summarization: a novel task and a language-neutral approach",
+      "authors": "Diogo Pernes, Gonçalo M. Correia, Afonso Mendes",
+      "source": "https://aclanthology.org/2024.findings-emnlp.755/",
+      "license": "CC BY 4.0",
+      "pdf_sha256": "410f56ae079b937f2e531f0cddc1aec225579c56c59f816245120a3346548990",
+      "chunks": [
+        {
+          "page": 1,
+          "text": "lingual summa- rization techniques and evaluation. Our main con- tributions in this work are summarized as follows: First, we introduce MTXLS formally as a novel task (Section 3), motivated by the need of produc- ing summaries coherently for multiple target lan- guages. Second, we present a re-ranking-based ap- proach to address this problem (Section 4), where the re-ranking phase selects a set of summaries that exhibit superior semantic coherence across target languages compared to treating each cross-lingual summarization task independently. Notably, our approach circumvents the need for a pivot language. This language-neutral strategy ensures a more ro- bust and unbiased multilingual summarization pro- cess. Finally, we propose and conduct a multi- criteria evaluation protocol that goes beyond the simple evaluation of the similarity between gener- Findings of the Association for Computational Linguistics: EMNLP 2024, pages 12908–12924 November 12-16,"
+        },
+        {
+          "page": 2,
+          "text": "in the cross-lingual summarization lit- erature either involve ﬁrst generating a summary in the source language and then using it to guide the generation of the target language summary (Bai et al., 2021), or employing a content plan gener- ation step to condition the decoding of the target summary (Huot et al., 2024). However, they do not explicitly enforce or evaluate semantic similarity across summaries in different target languages. Table 1: An example of an en→{es, fr} summarization task solved by three different state-of-the-art systems, including ours. Text in red marks information that is present in a summary for one of the languages but not in the other summary. 2.2 Quality Estimation for Machine Translation ated summaries and references (Section 5). Specif- ically, we incorporate the important aspect of eval- uating the coherence of the entire set of generated summaries across all target languages using quality estimation methods for machine translation. The code and data"
+        },
+        {
+          "page": 2,
+          "text": "2021; Urlana et al., 2023). Among these, CrossSum (Bhattacharjee et al., 2023) stands out as the most resourceful. This news dataset contains document- summary pairs for 45 different languages and more than 1,500 language directions, and it was built by automatically pairing the data from the multilin- gual dataset XL-Sum (Hasan et al., 2021), which consists of news articles from BBC. Earlier cross-lingual summarization models op- erated on a per-language-pair basis (Zhu et al., 2019; Cao et al., 2020; Bai et al., 2021; Liang et al., 1https://github.com/Priberam/MTXLSum Quality estimation methods for MT can be per- formed at various levels: word-level, where binary labels (OK or BAD) are assigned to each machine- translated word, and sentence- or document-level, where a score is generated as an estimate of"
+        },
+        {
+          "page": 3,
+          "text": "ion et al., 2023) replaces LASER with SONAR embeddings, supports both speech and text modali- ties, and exists in both reference-dependent and reference-free (i.e., quality estimation) variants. Similarly, COMET (Rei et al., 2020) was initially introduced as a reference-dependent metric that cross-encodes the source text and the reference and machine-generated translations using an XLM- RoBERTa model (Conneau et al., 2020). Later, a similar idea was followed to build its reference-free version, called CometKiwi (Rei et al., 2022). = Ey⇡￿xo,⇡p(yt ￿y⇡,t), (1) 3 Multi-Target Cross-Lingual Summarization 3.1 Problem Formulation This section formalizes the task of MTXLS. Let xo ∈X represent a document in the source lan- guage o, and let T = {t1,t2,...,tN} denote a set of N target languages. Without loss of general"
+        },
+        {
+          "page": 3,
+          "text": ", and let T = {t1,t2,...,tN} denote a set of N target languages. Without loss of general- ity, we assume that o ∈T . The primary goal of MTXLS is to generate a set of N summaries, de- noted as S = {yt1,yt2,...,ytN }, where there is a summary yti ∈Y for each language in T . It is evident that this task can be seen as a com- bination of a monolingual summarization task in language o and N −1 cross-lingual summarization tasks from o to each target language t ∈T ￿{o}. While these tasks could be approached indepen- for each t ∈T . Approximating this expectation with a single sample and using the source lan- guage as the pivot language yields the conventional summarize-and-translate approach to cross-lingual summarization. While this baseline ensures coher- ence across multiple target"
+        },
+        {
+          "page": 3,
+          "text": "conventional summarize-and-translate approach to cross-lingual summarization. While this baseline ensures coher- ence across multiple target languages by deriving summaries from the translation of the same pivot summary, it has inherent drawbacks. In particular, it involves two successive phases of decoding: ﬁrst generating the pivot summary, and then generating summaries for each target language, thus poten- tially suffering from error accumulation from both decoding phases. Moreover, it is likely to degrade the similarity to the reference summaries in the target languages because it is biased towards the pivot language. Thus, all resulting summaries will reﬂect any biases introduced during the summariza- tion from language o to language ⇡. 4 Methodology 4.1 Beyond Summarize-and-Translate dently, we impose a constraint: all N summaries should convey identical information regardless of the language. This constraint ensures the alignment of information across different languages, thus pro- moting coherence in the resulting set of sum"
+        },
+        {
+          "page": 3,
+          "text": "regardless of the language. This constraint ensures the alignment of information across different languages, thus pro- moting coherence in the resulting set of summaries. We now relax the conditional independence as- 3.2 Summarize-and-Translate sumption made previously by explicitly condition- ing yt on xo, as shown in Figure 1b. Notably, this approach does not involve decoding yt after y⇡, but rather allows the two processes to run in par- allel, and explicitly promotes semantic similarity between y⇡and each yt, as required to satisfy our constraint. We now have: Let us impose that: p(yt ￿xo,t,⇡) = Ey⇡￿xo,⇡p(yt ￿xo,y⇡,t). (2) Consider a scenario where a summarization model is available for generating summaries from lan- guage o to a pivot language ⇡. Additionally, there are models for translating from ⇡to each language in T . Common statistical approaches to these tasks involve modeling the summarization distribu- tion p(y⇡￿xo,"
+        },
+        {
+          "page": 4,
+          "text": "t). This framework unveils diverse avenues for MTXLS. One is to directly train p(yt ￿xo,t,⇡) by jointly learning φ and q from data, which requires cross-lingual document- summary pairs for all target languages and parallel data between the pivot and each target language. Alternatively, φ could be used as a re-scoring func- tion at each decoding step from q, but this would introduce a signiﬁcant computational burden. Our primary goal is now to conceive a method that allows us to sample summaries from: Z′ p(S ￿xo,T ) = '(S) N ￿ i=1 We demonstrate we can achieve this goal through q(yti ￿xo,ti). (7) rejection sampling, which works as follows. Given a distribution f(x) from which we aim to sam- ple and a proposal distribution g(x) satisfying supx In our work, we adopt a simpler re-ranking ap- proach. We use q to generate k"
+        },
+        {
+          "page": 4,
+          "text": "g(x) satisfying supx In our work, we adopt a simpler re-ranking ap- proach. We use q to generate k candidate sum- maries for each target language t, and then use φ to select the optimal candidate. Notably, this allows simultaneous generation of candidate and pivot summaries, and enhances the semantic co- herence of generated summaries while maintaining similarity to the reference cross-lingual distribu- tion used to train the summarizer, which were not possible in the summarize-and-translate approach. As shown in Section 4.3, our approach has a deep connection with rejection sampling. f(x) g(x) ≤M, we start by generating a sample x from g and a sample u uniformly in [0,1]. Sub- sequently, we accept x if f(x) Mg(x) ≥u and reject it otherwise."
+        },
+        {
+          "page": 5,
+          "text": "presented our methodology in a for- mal manner, but have not yet provided speciﬁcs on implementing a function φ capable of measuring the semantic similarity between two summaries in different languages. In practice, any quality estima- tion model for MT (Section 2.2) could be used. In our experiments, we leverage the cosine similarity of SONAR embeddings (Duquenne et al., 2023) as the similarity metric, reserving BLASER 2.0 (Chen φ(yσ(T )i,yσ(T )i+1). (9) ￿ i=1 ˆ'(S;σ) = N −1"
+        },
+        {
+          "page": 6,
+          "text": "b. 5 Experiments 5.1 Dataset We use a subset of the CrossSum dataset, including All summaries except those of Mistral 7B were decoded from the same mT5 base model (Xue et al., 2021) ﬁne-tuned in CrossSum. In the S&T approach, translations were performed using the NLLB 1.3B model (Costa-jussà et al., 2022). NeutralRR and PivotRR used beam search multinomial sampling using with 5 beams and a temperature of 1.0 for can- didate generation.2 The pivot summary in PivotRR was decoded using beam search with 8 beams. For Mistral 7B, we used multinomial sampling with a temperature of 0.1. Further implementation details are provided in Appendix B. 5.3 Evaluation Metrics data in the following languages: Arabic, Chinese (simpliﬁed), English, French, Portuguese, Russian, and Spanish. CrossSum pairs documents in one lan- guage with summaries"
+        },
+        {
+          "page": 6,
+          "text": "iﬁed), English, French, Portuguese, Russian, and Spanish. CrossSum pairs documents in one lan- guage with summaries from documents in another language, using automatic similarity metrics. How- ever, mispairings are frequent due to this automated process. Additionally, the dataset is designed for single-target cross-lingual summarization and does not perfectly ﬁt our multi-target setting. To adapt the dataset to our needs, we restructured the dataset into clusters. This process is explained in Ap- pendix A. Each resulting cluster consists of up to seven multilingual document-summary pairs, with one such pair for each language. This allows us to select any document within the cluster as a source for summarization, with all summaries within the cluster serving as references for each of the lan- guages. Statistics about the clustered data and an analysis of the semantic coherence of the dataset summaries are also provided in Appendix A. Throughout this work, we emphasize the impor- tance"
+        },
+        {
+          "page": 6,
+          "text": "semantic coherence of the dataset summaries are also provided in Appendix A. Throughout this work, we emphasize the impor- tance of evaluating MTXLS not only by comparing the generated summaries for each target language with their respective references, but also by evalu- ating the semantic coherence across different target languages. To evaluate the former, we present the ROUGE-2 F1 scores (Lin, 2004) for each generated summary against its corresponding reference in the same target language. In addition, we calculate the BLASER 2.0 score (Communication et al., 2023) by treating the generated summary as the trans- lation and the reference summary for the source language as the source text. This evaluation metric is justiﬁed due to mismatched articles in CrossSum, as explained in Section 5.1, which reduces the reli- ability of reference summaries in languages other than the source. 5.2 Methods To assess semantic coherence across various tar- get languages, we evaluate how well each gener- ate"
+        },
+        {
+          "page": 7,
+          "text": "all the languages in the cluster, including the source language, using each of the methods mentioned in Section 5.2. larity to the reference summaries (ROUGE-2 and BLASER 2.0 (R)), even though it was instructed that the articles were obtained from the BBC and that the summaries should follow the BBC style (see Appendix C). Regarding the coherence across target languages, we observe that the model has a very decent performance, as illustrated in Ta- ble 1, ranking second in CometKiwi scores, only surpassed by S&T. However, the model often failed to produce the output in the requested format, in which case we had to repeat the request, or did not produce text in the speciﬁed target language (see Appendix D.1). For these reasons, we did not extend its evaluation to other source languages beyond English and Chinese. The results are in Table 2 and are presented per language pair. Due to space limitations, we present detailed results only for English (en) and Chinese (zh"
+        },
+        {
+          "page": 7,
+          "text": "in Table 2 and are presented per language pair. Due to space limitations, we present detailed results only for English (en) and Chinese (zh), and show the averages for the re- maining source and target languages (rest). An extended version of this table, including detailed results for more languages, conﬁdence intervals, and the accuracy of each approach on following the target language is shown in Appendix D.1. When the source and target languages are the same, S&T and PivotRR reduce to M2MS because we use the source language as the pivot. Consequently, the results of these three methods for ROUGE-2 and BLASER 2.0 (R) coincide for en→en and zh→zh. We begin by discussing the results of Mistral 7B, as these deserve special attention. Interestingly, the model always performs worst in terms of simi- The method M2MS conducts cross-lingual sum- marization for each target language independently, disregarding semantic coherence across languages. Consequently, it consistently achieves the"
+        },
+        {
+          "page": 7,
+          "text": "cross-lingual sum- marization for each target language independently, disregarding semantic coherence across languages. Consequently, it consistently achieves the highest ROUGE-2 scores but ranks lowest in coherence metrics (CometKiwi and BLASER 2.0 (C)). Con- versely, S&T ensures the best semantic coherence across target languages by directly translating the source language summary for each target language. However, this often results in signiﬁcant degrada- tion in similarity with the references for each target language, as measured by ROUGE-2, and, in many cases, even diminishes similarity to the reference summary for the source language, as measured by"
+        },
+        {
+          "page": 8,
+          "text": "the similarity between the se- lected summaries and the reference in the source language, as measured by BLASER 2.0 (R). We justify this observation by the hypothesis that a set of summaries with high similarity can serve as a reliable indicator of summary quality, since it is unlikely that the model generates the same false information in multiple languages. This was illus- trated in the example in Table 1 for NeutralRR. Finally, as more candidates are considered, compu- tation time increases, yet so does the similarity of selected summaries, as evaluated by CometKiwi. Notably, this similarity increase is more signiﬁcant for NeutralRR, which is not limited by maximizing similarity to a ﬁxed pivot summary. Our approaches (PivotRR and NeutralRR) do not signiﬁcantly degrade ROUGE-2 scores com- pared to M2MS and notably achieve the highest sim- ilarity to the the reference summary for the source language. As expected, our methods also signiﬁ- cantly"
+        },
+        {
+          "page": 8,
+          "text": "achieve the highest sim- ilarity to the the reference summary for the source language. As expected, our methods also signiﬁ- cantly improve semantic coherence across differ- ent target languages compared to M2MS. NeutralRR performs comparably to PivotRR in terms of simi- larity to the reference summaries, and consistently outperforms it in terms of semantic coherence across target languages. This was expected because NeutralRR treats all languages equally and aims for a set of summaries with high similarity. Con- versely, PivotRR utilizes a ﬁxed pivot summary and seeks candidates in each target language that closely resemble the pivot. 6 Conclusion 5.5 Effect of Varying the Number of Candidates In this experiment, we investigate how the perfor- mance of our methods changes as we vary the num- ber of candidates for re-ranking, using English as the source language. To vary the number of candi- dates generated by beam search multinomial sam- pling, we kept the number of beams per"
+        },
+        {
+          "page": 9,
+          "text": "Limitations References While we believe that our approach has merit, it Mikel Artetxe and Holger Schwenk. 2019. Mas- sively multilingual sentence embeddings for zero- shot cross-lingual transfer and beyond. Transactions of the Association for Computational Linguistics, 7:597–610. Yu Bai, Yang Gao, and Heyan Huang. 2021. Cross- lingual abstractive summarization with limited par- allel resources. In Proceedings of the 59th Annual Meeting of the Association for Computational Lin- guistics and the 11th International Joint Conference on Natural Language Processing (Volume 1: Long Papers), pages 6910–6924, Online. Association for Computational Linguistics. Abhik Bhattacharjee, Tahmid Hasan, Wasi Uddin Ah- mad, Yuan-Fang Li, Yong-Bin Kang, and Rifat Shahriyar. 2023. CrossSum: Beyond English-centric cross-lingual summarization for 1,500+ language pairs. In Proceedings of the 61"
+        },
+        {
+          "page": 9,
+          "text": "our approach. Second, the success of our re-ranking approaches depends on the quality of the sampled candidates. If all candidates are of low quality, or if they have poor semantic coher- ence across target languages, our approaches will inevitably fail. Investigating computationally efﬁ- cient ways to incorporate the semantic coherence constraint directly at decoding time is an interesting research direction. Finally, our method introduces increased computational complexity compared to the usual beam search decoding. learning to align and summarize for neural cross- lingual summarization. In Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics, pages 6220–6231, Online. Association for Computational Linguistics. Mingda Chen, Paul-Ambroise Duquenne, Pierre An- drews, Justine Kao, Alexandre Mourachko, Hol- ger Schwenk, and Marta R. Costa-jussà. 2023a. BLASER: A text-free speech-to-speech translation evaluation metric. In Proceedings of the 61st Annual Meeting"
+        }
+      ],
+      "queries": [
+        {
+          "category": "factual_lookup",
+          "question": "Which dataset was subsetted for the experiments?",
+          "labels": [
+            {
+              "chunk": 10,
+              "quote": "We use a subset of the CrossSum dataset"
+            }
+          ]
+        },
+        {
+          "category": "methodology",
+          "question": "How does the candidate reranker choose a final summary for each target language?",
+          "labels": [
+            {
+              "chunk": 8,
+              "quote": "use q to generate k candidate sum- maries for each target language t, and then use φ to select the optimal candidate"
+            }
+          ]
+        },
+        {
+          "category": "numerical",
+          "question": "What was the beam width for decoding the PivotRR pivot summary?",
+          "labels": [
+            {
+              "chunk": 10,
+              "quote": "The pivot summary in PivotRR was decoded using beam search with 8 beams"
+            }
+          ]
+        },
+        {
+          "category": "synthesis",
+          "question": "What decoding drawback does summarize-and-translate have, and how do the authors avoid sequential decoding?",
+          "labels": [
+            {
+              "chunk": 5,
+              "quote": "two successive phases of decoding"
+            },
+            {
+              "chunk": 6,
+              "quote": "allows the two processes to run in par- allel"
+            }
+          ]
+        },
+        {
+          "category": "evidence_gap",
+          "question": "When do the proposed re-ranking approaches fail because of their candidate summaries?",
+          "labels": [
+            {
+              "chunk": 19,
+              "quote": "If all candidates are of low quality"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

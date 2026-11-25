@@ -7,9 +7,11 @@ export type RetrievedPassage = {
 };
 
 export type AnswerSource = RetrievedPassage & { id: string; highlight_text: string };
-export type ExternalSource = { id: string; title: string; url: string; published_date: string | null; excerpt?: string | null };
+export type ExternalSource = { id: string; title: string; url: string; published_date: string | null; excerpt?: string | null;
+  publisher?: string | null; author?: string | null; verified_publication_date?: string | null };
 export type EvidenceReview = { level: "sufficient" | "partial" | "none"; chunk_ids: string[]; missing_information: string };
-export type ClaimReview = { section: "pdf" | "external"; status: string; supporting: { source_id: string; quote: string }[] };
+export type ClaimReview = { section: "pdf" | "external"; status: string; supporting: { source_id: string; quote: string }[];
+  text?: string; explanation?: string; opposing?: { source_id: string; quote: string }[] };
 
 export type AskResult = {
   paper_id: string;
@@ -23,7 +25,8 @@ export type AskResult = {
   external_sources?: ExternalSource[];
   assessment?: EvidenceReview | null;
   claims?: ClaimReview[];
-  verification_status?: "verified" | "unavailable";
+  verification_status?: "verified" | "not_verified" | "unavailable";
+  answer_state?: "VERIFIED" | "PARTIALLY_SUPPORTED" | "INSUFFICIENT_EVIDENCE" | "VERIFICATION_UNAVAILABLE" | null;
   retry_after_seconds?: number;
 };
 
@@ -38,7 +41,8 @@ export type SavedMessage = {
   claims?: ClaimReview[];
   created_at: string;
   feedback?: AnswerFeedback | null;
-  verification_status?: "verified" | "unavailable";
+  verification_status?: AskResult["verification_status"];
+  answer_state?: AskResult["answer_state"];
   retry_after_seconds?: number;
 };
 
@@ -51,8 +55,8 @@ export type RecommendedQuestion = {
   id: string;
   text: string;
   recommendation_type: "paper" | "methodology" | "findings" | "limitations" | string;
-  page_number: number;
-  chunk_index: number;
+  page_number: number | null;
+  chunk_index: number | null;
 };
 
 export type Conversation = {
@@ -70,7 +74,9 @@ export type Conversation = {
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 
 export class ResearchApiError extends Error {
-  constructor(message: string, public status: number, public retryAfterSeconds: number | null = null) {
+  constructor(message: string, public status: number, public retryAfterSeconds: number | null = null,
+    public retrieved: { paperId: string; passages: RetrievedPassage[] } | null = null,
+    public limitSource: string | null = null) {
     super(message);
   }
 }
@@ -87,12 +93,19 @@ async function researchRequest<T>(path: string, options?: RequestInit): Promise<
   }
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    const detail = typeof payload?.detail === "string" ? payload.detail : "Research could not finish.";
+    const body = payload?.detail;
+    const hasProviderPassages = (response.status === 429 && ["upstream_capacity", "rate_limited"].includes(body?.code))
+      || (response.status === 502 && body?.code === "provider_unavailable");
+    const detail = typeof body === "string" ? body
+      : (hasProviderPassages || response.status === 429) && typeof body?.message === "string"
+        ? body.message : "Research could not finish.";
+    const retrieved = hasProviderPassages && typeof body.paper_id === "string" && Array.isArray(body.passages)
+      ? { paperId: body.paper_id, passages: body.passages as RetrievedPassage[] } : null;
     const retryHeader = Number(response.headers.get("Retry-After"));
     const retryAfter = response.status === 429 && Number.isFinite(retryHeader) && retryHeader > 0
       ? Math.ceil(retryHeader) : null;
-    throw new ResearchApiError(retryAfter ? `${detail} Try again in ${Math.ceil(retryAfter / 60)} minute${retryAfter > 60 ? "s" : ""}.` : detail,
-      response.status, retryAfter);
+    const limitSource = response.status === 429 && typeof body?.limit_source === "string" ? body.limit_source : null;
+    throw new ResearchApiError(detail, response.status, retryAfter, retrieved, limitSource);
   }
   return payload as T;
 }
