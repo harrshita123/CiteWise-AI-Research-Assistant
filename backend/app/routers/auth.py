@@ -8,9 +8,12 @@ from starlette.concurrency import run_in_threadpool
 
 from ..config import Settings, get_settings
 from ..dependencies import get_current_user, get_user_repository, to_user_response
+from ..paper_models import ChunkResponse
 from ..models import AuthenticationResponse, GoogleCredentialRequest, LoginRequest, SignupRequest, UserResponse
 from ..repositories.users import UserRepository
-from ..services.demo_research import CASES, SAMPLE_FILENAME, SAMPLE_IDENTITY, SAMPLE_PDF, SAMPLE_SHA256, sample_source
+from ..services.demo_research import (
+    CASES, SAMPLE_FILENAME, SAMPLE_IDENTITY, SAMPLE_PDF, SAMPLE_SHA256, load_sample_index, sample_source,
+)
 from ..services.document_classification import DocumentType, classify_document
 from ..services.publication_identity import extract_identity_input, extracted_paper_metadata
 from ..services.verification_gates import VerificationReport, document_quality
@@ -61,10 +64,14 @@ async def start_demo(request: Request, response: Response, settings: Settings = 
             if outcome != DocumentType.RESEARCH_PAPER:
                 raise ValueError("Bundled PDF failed research classification.")
             identity.pop("tail", None)
-            counts = await run_in_threadpool(ingestion.process, owner, paper_id, content)
-            chunks = await run_in_threadpool(ingestion.preview, owner, paper_id, limit=counts["chunk_count"])
-            if any(sample_source(case, chunks) is None for case in CASES):
+            page_count, chunks, vectors = await run_in_threadpool(
+                load_sample_index, ingestion.embeddings.model_name, ingestion.embeddings.dimensions,
+            )
+            sources = [ChunkResponse.model_validate(chunk, from_attributes=True) for chunk in chunks]
+            if any(sample_source(case, sources) is None for case in CASES):
                 raise ValueError("Bundled sample evidence is missing.")
+            await run_in_threadpool(ingestion.vectors.save, owner, paper_id, chunks, vectors)
+            await run_in_threadpool(ingestion.local_storage.save, paper_id, content)
             report = VerificationReport("document")
             for check, reason in (("H1", "authenticated_owner_assigned"), ("H2", "checked_publisher_pdf"),
                                   ("H3", "scholarly_document"), ("H4", "usable_text_mapped_to_pages")):
@@ -78,7 +85,7 @@ async def start_demo(request: Request, response: Response, settings: Settings = 
                 "publication_identity": SAMPLE_IDENTITY,
                 "embedding_model": ingestion.embeddings.model_name,
                 "embedding_dimensions": ingestion.embeddings.dimensions,
-                "created_at": datetime.now(timezone.utc), **counts})
+                "created_at": datetime.now(timezone.utc), "page_count": page_count, "chunk_count": len(chunks)})
         except Exception:
             await run_in_threadpool(ingestion.cleanup, owner, paper_id, "local")
             await users.collection.delete_one({"_id": user["_id"]})

@@ -10,8 +10,9 @@ from pydantic import ValidationError
 from pymongo import MongoClient
 
 from app.config import Settings, get_settings
+from app.paper_models import ChunkResponse
 from app.providers.embeddings import LocalEmbeddings
-from app.services.demo_research import CASES, EXTERNAL_QUESTIONS, SAMPLE_IDENTITY, SAMPLE_PDF, SAMPLE_SHA256, SAMPLE_TITLE, is_sample
+from app.services.demo_research import CASES, EXTERNAL_QUESTIONS, SAMPLE_IDENTITY, SAMPLE_PDF, SAMPLE_SHA256, SAMPLE_TITLE, is_sample, load_sample_index, sample_source
 from app.services.document_classification import DocumentType
 from app.services.publication_identity import verify_pdf_identity
 from tests.test_papers import make_pdf, test_tokenizer as make_tokenizer
@@ -36,6 +37,17 @@ class DemoConfigurationTests(unittest.TestCase):
             self.assertEqual(Settings(**settings).embedding_batch_size, 1)
             self.assertEqual(Settings(**settings, embedding_batch_size=4).embedding_batch_size, 4)
             self.assertEqual(Settings.model_fields["embedding_batch_size"].default, 32)
+
+    def test_bundled_index_contains_verifiable_pages_and_minilm_vectors(self):
+        page_count, chunks, vectors = load_sample_index(LocalEmbeddings.model_name, LocalEmbeddings.dimensions)
+        with pymupdf.open(SAMPLE_PDF) as pdf:
+            self.assertEqual(page_count, len(pdf))
+        self.assertEqual(len(chunks), len(vectors))
+        sources = [ChunkResponse.model_validate(chunk, from_attributes=True) for chunk in chunks]
+        for case in CASES:
+            self.assertEqual(sample_source(case, sources).page_number, case.page)
+        with self.assertRaises(ValueError):
+            load_sample_index("wrong-model", LocalEmbeddings.dimensions)
 
     def test_every_sample_answer_is_supported_on_the_cited_pdf_page(self):
         with pymupdf.open(SAMPLE_PDF) as pdf:

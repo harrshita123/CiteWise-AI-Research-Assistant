@@ -1,11 +1,14 @@
 """Curated evidence from the bundled article and two published commentaries."""
 
 from dataclasses import dataclass
+import gzip
+import json
 from pathlib import Path
 import re
 import unicodedata
 
 from ..paper_models import ChunkResponse
+from .pdf_processing import TextChunk
 from .question_recommendations import RecommendedQuestion
 
 
@@ -68,6 +71,19 @@ EXTERNAL_QUESTIONS = (
     "Where did Goodman and Greenland disagree with Ioannidis in the 2007 exchange?",
     "What did Ioannidis say in his reply about significant p-values near 0.05?",
 )
+
+def load_sample_index(model_name: str, dimensions: int) -> tuple[int, list[TextChunk], list[list[float]]]:
+    """Read the checked PDF's MiniLM index without initializing inference during guest sign-in."""
+    with gzip.open(SAMPLE_PDF.with_suffix(".index.json.gz"), "rt", encoding="utf-8") as fixture:
+        index = json.load(fixture)
+    if index["pdf_sha256"] != SAMPLE_SHA256 or index["model"] != model_name:
+        raise ValueError("Bundled sample index does not match the PDF or embedding model.")
+    chunks = [TextChunk(**chunk) for chunk in index["chunks"]]
+    vectors = index["vectors"]
+    if not chunks or len(chunks) != len(vectors) or any(len(vector) != dimensions for vector in vectors):
+        raise ValueError("Bundled sample index has invalid dimensions.")
+    return index["page_count"], chunks, vectors
+
 
 def question_key(text: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", text).casefold().strip().rstrip("?!.").split())
